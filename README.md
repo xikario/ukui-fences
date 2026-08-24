@@ -86,7 +86,7 @@ ukui-fences-launcher --quit
 
 ## AI 相关配置
 
-系统监控的 AI 诊断默认使用 DeepSeek 兼容接口。仓库中**不保存 API Key**：
+系统监控的 AI 诊断默认使用 DeepSeek 兼容接口：
 
 ```bash
 export DEEPSEEK_API_KEY="your-key"
