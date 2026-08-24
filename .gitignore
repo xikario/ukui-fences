@@ -1,0 +1,34 @@
+# Build outputs
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Local dependency caches
+.local-deps/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Logs / temporary files
+*.log
+*.tmp
+*.bak
+*~
+
+# IDE / editor
+.vscode/
+.idea/
+*.user
+
+# Packages / generated artifacts
+*.deb
+*.rpm
+*.tar.gz
+*.zip
