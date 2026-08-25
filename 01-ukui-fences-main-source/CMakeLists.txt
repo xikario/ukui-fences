@@ -39,6 +39,7 @@ add_executable(ukui-fences
     src/FenceWidget.cpp
     src/DesktopIcon.cpp
     src/FileClipboard.cpp
+    src/OfficeDocumentFactory.cpp
     src/SystemMonitor.cpp
     src/SmartSpaceWidget.cpp
     src/MenuStyle.h
@@ -64,6 +65,16 @@ target_link_libraries(ukui-fences PRIVATE
 )
 
 if(BUILD_TESTING)
+    add_executable(office_document_factory_test
+        tests/test_office_document_factory.cpp
+        src/OfficeDocumentFactory.cpp)
+    target_include_directories(office_document_factory_test PRIVATE src/)
+    target_link_libraries(office_document_factory_test PRIVATE
+        Qt5::Core
+        ZLIB::ZLIB)
+    add_test(NAME office_document_factory
+        COMMAND office_document_factory_test)
+
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME smart_space_indexer

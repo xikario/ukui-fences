@@ -128,11 +128,13 @@ QRect folderDropHotRect(const QWidget *widget, int iconSize)
 {
     if (!widget)
         return {};
-    const int padding = qMax(6, iconSize / 8);
-    return QRect((widget->width() - iconSize) / 2 - padding,
-                 qMax(0, 6 - padding),
-                 iconSize + padding * 2,
-                 iconSize + padding * 2);
+    Q_UNUSED(iconSize);
+
+    // 文件夹的整个网格（图标+文字+下方留白）都应是投放区。
+    // 旧实现只接受上方文件夹图形附近的小矩形；拖影热点落到
+    // 文字或格子下半部时，事件就会被父 Fence 接管，结果变成
+    // “加入分区”。命中区与界面显示的整格范围保持一致。
+    return widget->rect().adjusted(1, 1, -1, -1);
 }
 
 QPixmap dragPreviewPixmap(const QIcon &icon, int iconSize, int count)

@@ -78,6 +78,7 @@ signals:
                           bool move);
     void dragOperationFinished(const QStringList &paths,
                                Qt::DropAction action);
+    void dragSourcesPrepared(const QStringList &paths);
     void fileCreated(const QString &path);
 
 protected:

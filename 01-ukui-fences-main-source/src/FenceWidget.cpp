@@ -1,4 +1,5 @@
 #include "FenceWidget.h"
+#include "OfficeDocumentFactory.h"
 #include "DesktopIcon.h"
 #include "DesktopCanvas.h"
 #include "FileClipboard.h"
@@ -464,13 +465,13 @@ void FenceWidget::createNewFile(const QString &baseName,
     }
 
     const QString path = dir.absoluteFilePath(name);
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
+    QString errorMessage;
+    if (!OfficeDocumentFactory::createBlankFile(path, &errorMessage)) {
         QMessageBox::warning(this, "新建失败",
-                             QString("无法创建 %1。").arg(name));
+                             QString("无法创建 %1。\n%2")
+                                 .arg(name, errorMessage));
         return;
     }
-    file.close();
     finishNewItem(path);
 }
 
@@ -593,13 +594,24 @@ void FenceWidget::insertItem(const DesktopItem &item, int index)
     });
     connect(icon, &DesktopIcon::dragStarted,
             this, [this](DesktopIcon *, QList<QUrl> *urls) {
-        if (!urls || m_selectedIcons.size() <= 1) return;
-        for (auto *selected : m_selectedIcons) {
-            if (!selected || selected->item().isSystemIcon) continue;
-            const QUrl url = QUrl::fromLocalFile(selected->item().filePath);
-            if (!urls->contains(url))
-                urls->append(url);
+        if (!urls)
+            return;
+        if (m_selectedIcons.size() > 1) {
+            for (auto *selected : m_selectedIcons) {
+                if (!selected || selected->item().isSystemIcon) continue;
+                const QUrl url = QUrl::fromLocalFile(selected->item().filePath);
+                if (!urls->contains(url))
+                    urls->append(url);
+            }
         }
+
+        QStringList paths;
+        for (const QUrl &url : *urls) {
+            const QString path = url.toLocalFile();
+            if (!path.isEmpty() && !paths.contains(path))
+                paths << path;
+        }
+        emit dragSourcesPrepared(paths);
     });
     connect(icon, &DesktopIcon::fileRemoved,
             this, [this](const QString &path) {

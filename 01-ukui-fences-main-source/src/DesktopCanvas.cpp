@@ -1,4 +1,5 @@
 #include "DesktopCanvas.h"
+#include "OfficeDocumentFactory.h"
 #include "FenceWidget.h"
 #include "DesktopIcon.h"
 #include "FileClipboard.h"
@@ -8,6 +9,7 @@
 
 #include <QApplication>
 #include <QDateTime>
+#include <QDebug>
 #include <QFileDialog>
 #include <QPainter>
 #include <QLinearGradient>
@@ -49,6 +51,7 @@
 #include <QStringList>
 #include <QTextStream>
 #include <algorithm>
+#include <sys/stat.h>
 #if defined(__GLIBC__)
 #include <malloc.h>
 #endif
@@ -175,6 +178,27 @@ bool transferDroppedPathToDesktop(const QString &srcPath,
                                   bool move)
 {
     return FileClipboard::transferPath(srcPath, targetPath, move);
+}
+
+bool unixFileIdentity(const QString &path,
+                      QPair<quint64, quint64> *identity)
+{
+    if (!identity)
+        return false;
+
+    const QByteArray encoded = QFile::encodeName(path);
+    struct stat info {};
+    if (::lstat(encoded.constData(), &info) != 0)
+        return false;
+
+    *identity = qMakePair(quint64(info.st_dev), quint64(info.st_ino));
+    return info.st_ino != 0;
+}
+
+QString identityKey(const QPair<quint64, quint64> &identity)
+{
+    return QString::number(identity.first) + QLatin1Char(':')
+        + QString::number(identity.second);
 }
 
 QString layoutPath()
@@ -1524,13 +1548,24 @@ void DesktopCanvas::connectLooseIcon(DesktopIcon *icon)
     // 多文件拖动：当一个图标开始拖动时，把其他选中文件的 URL 也加入
     connect(icon, &DesktopIcon::dragStarted,
             this, [this](DesktopIcon * /* self */, QList<QUrl> *urls) {
-        if (!urls || m_selectedIcons.size() <= 1) return;
-        for (auto *sel : m_selectedIcons) {
-            if (!sel || sel->item().isSystemIcon) continue;
-            const QUrl u = QUrl::fromLocalFile(sel->item().filePath);
-            if (!urls->contains(u))
-                urls->append(u);
+        if (!urls)
+            return;
+        if (m_selectedIcons.size() > 1) {
+            for (auto *sel : m_selectedIcons) {
+                if (!sel || sel->item().isSystemIcon) continue;
+                const QUrl u = QUrl::fromLocalFile(sel->item().filePath);
+                if (!urls->contains(u))
+                    urls->append(u);
+            }
         }
+
+        QStringList paths;
+        for (const QUrl &url : *urls) {
+            const QString path = url.toLocalFile();
+            if (!path.isEmpty() && !paths.contains(path))
+                paths << path;
+        }
+        rememberDragSources(paths);
     });
 }
 
@@ -3284,13 +3319,13 @@ void DesktopCanvas::createNewDesktopFile(const QString &baseName,
                    .arg(baseName).arg(n++).arg(normalizedSuffix);
 
     const QString path = dir.absoluteFilePath(name);
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
+    QString errorMessage;
+    if (!OfficeDocumentFactory::createBlankFile(path, &errorMessage)) {
         QMessageBox::warning(this, "新建失败",
-                             QString("无法创建 %1。").arg(name));
+                             QString("无法创建 %1。\n%2")
+                                 .arg(name, errorMessage));
         return;
     }
-    file.close();
     recordCreateUndo(path);
     finishNewDesktopItem(path, clickPos);
 }
@@ -3371,7 +3406,10 @@ void DesktopCanvas::handleFilesTransferred(
         op.sourcePaths << source;
         op.targetPaths << target;
         FenceWidget *owner = fenceContainingPath(source);
-        op.fenceIds << (owner ? owner->fenceId() : QString());
+        op.fenceIds << (owner ? owner->fenceId()
+                              : m_dragSourceFenceIds.value(source));
+        m_dragFileIdentities.remove(source);
+        m_dragSourceFenceIds.remove(source);
     }
 
     if (move)
@@ -3383,15 +3421,182 @@ void DesktopCanvas::handleFilesTransferred(
     scheduleRefresh(1600);
 }
 
+void DesktopCanvas::rememberDragSources(const QStringList &paths)
+{
+    for (const QString &path : paths) {
+        const QString source = normalizedStoredPath(path);
+        if (source.isEmpty())
+            continue;
+
+        QPair<quint64, quint64> identity;
+        if (!unixFileIdentity(source, &identity))
+            continue;
+
+        m_dragFileIdentities.insert(source, identity);
+        if (FenceWidget *owner = fenceContainingPath(source))
+            m_dragSourceFenceIds.insert(source, owner->fenceId());
+        else
+            m_dragSourceFenceIds.remove(source);
+    }
+}
+
+void DesktopCanvas::findExternalMoveTargets(const QStringList &paths,
+                                            int attempt)
+{
+    constexpr int maxAttempts = 4;
+    QStringList waitingForMove;
+    QStringList missingSources;
+
+    for (const QString &path : paths) {
+        const QString source = normalizedStoredPath(path);
+        if (!m_dragFileIdentities.contains(source))
+            continue;
+        if (QFileInfo::exists(source)) {
+            waitingForMove << source;
+            continue;
+        }
+
+        missingSources << source;
+    }
+
+    auto retryLater = [this, attempt](const QStringList &retryPaths) {
+        if (retryPaths.isEmpty())
+            return;
+        if (attempt >= maxAttempts) {
+            for (const QString &path : retryPaths) {
+                m_dragFileIdentities.remove(path);
+                m_dragSourceFenceIds.remove(path);
+            }
+            qWarning().noquote()
+                << "ukui-fences could not locate external move targets:"
+                << retryPaths.join(QStringLiteral(" | "));
+            return;
+        }
+
+        static const int delays[] = { 250, 700, 1600, 3500 };
+        QTimer::singleShot(delays[qBound(0, attempt, 3)], this,
+            [this, retryPaths, attempt] {
+                findExternalMoveTargets(retryPaths, attempt + 1);
+            });
+    };
+
+    if (missingSources.isEmpty()) {
+        retryLater(waitingForMove);
+        return;
+    }
+
+    const QString findExecutable =
+        QStandardPaths::findExecutable(QStringLiteral("find"));
+    const QString homeRoot = QDir::homePath();
+    QPair<quint64, quint64> homeIdentity;
+    if (findExecutable.isEmpty() ||
+        !unixFileIdentity(homeRoot, &homeIdentity)) {
+        retryLater(paths);
+        return;
+    }
+
+    // `find -xdev` 只扫描用户目录所在文件系统。设备号不同意味着
+    // Peony 执行的是跨盘复制+删除，inode 不再可用，此时宁可不登记
+    // 撤销，也不按名称猜测可能的目标文件。
+    QStringList searchableSources;
+    for (const QString &source : missingSources) {
+        if (m_dragFileIdentities.value(source).first == homeIdentity.first)
+            searchableSources << source;
+    }
+    if (searchableSources.isEmpty()) {
+        retryLater(paths);
+        return;
+    }
+
+    QStringList arguments;
+    arguments << homeRoot << QStringLiteral("-xdev")
+              << QStringLiteral("(");
+    for (int i = 0; i < searchableSources.size(); ++i) {
+        if (i > 0)
+            arguments << QStringLiteral("-o");
+        arguments << QStringLiteral("-inum")
+                  << QString::number(
+                         m_dragFileIdentities.value(searchableSources.at(i)).second);
+    }
+    arguments << QStringLiteral(")") << QStringLiteral("-print0");
+
+    auto *process = new QProcess(this);
+    process->setProgram(findExecutable);
+    process->setArguments(arguments);
+    connect(process,
+            qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this,
+            [this, process, waitingForMove, searchableSources, retryLater]
+            (int, QProcess::ExitStatus) {
+        const QList<QByteArray> records =
+            process->readAllStandardOutput().split('\0');
+        QHash<QString, QStringList> candidates;
+        const QString trashRoot = QDir::cleanPath(
+            QDir::homePath() + QStringLiteral("/.local/share/Trash"));
+
+        for (const QByteArray &record : records) {
+            if (record.isEmpty())
+                continue;
+            const QString candidate =
+                normalizedStoredPath(QFile::decodeName(record));
+            if (candidate == trashRoot ||
+                candidate.startsWith(trashRoot + QDir::separator()))
+                continue;
+
+            QPair<quint64, quint64> identity;
+            if (unixFileIdentity(candidate, &identity))
+                candidates[identityKey(identity)] << candidate;
+        }
+
+        QStringList sources;
+        QStringList targets;
+        QStringList unresolved = waitingForMove;
+        for (const QString &source : searchableSources) {
+            const QStringList matches =
+                candidates.value(identityKey(m_dragFileIdentities.value(source)));
+            if (matches.size() == 1) {
+                sources << source;
+                targets << matches.constFirst();
+            } else {
+                unresolved << source;
+            }
+        }
+
+        process->deleteLater();
+        if (!targets.isEmpty())
+            handleFilesTransferred(sources, targets, true);
+
+        retryLater(unresolved);
+    });
+    process->start();
+    QTimer::singleShot(8000, process, [process] {
+        if (process->state() != QProcess::NotRunning)
+            process->kill();
+    });
+}
+
 void DesktopCanvas::handleDragOperationFinished(
     const QStringList &paths,
     Qt::DropAction action)
 {
-    if (action != Qt::MoveAction || paths.isEmpty())
+    if (paths.isEmpty())
         return;
 
+    const bool move = action == Qt::MoveAction ||
+                      action == Qt::TargetMoveAction;
+    if (!move) {
+        for (const QString &path : paths) {
+            const QString source = normalizedStoredPath(path);
+            m_dragFileIdentities.remove(source);
+            m_dragSourceFenceIds.remove(source);
+        }
+        return;
+    }
+
     // 本进程接收端会立即更新归属；外部文件管理器可能异步执行移动。
-    // 这里触发集中式目录对账，不再由源图标猜测某个固定毫秒点。
+    // 除了集中式目录对账，还用拖动前记住的设备号+inode
+    // 定位 Peony 在同文件系统内的真实目标，供右键撤销使用。
+    findExternalMoveTargets(paths);
     scheduleRefresh();
     scheduleRefresh(600);
     scheduleRefresh(1800);
@@ -3689,15 +3894,23 @@ void DesktopCanvas::undoLastOperation()
         return;
     }
 
-    const UndoOperation op = m_undoStack.takeLast();
+    // 先保留原记录。旧实现在执行前 takeLast()，只要碰到
+    // 同名冲突或短暂 I/O 失败，撤销信息就永久丢失。
+    const UndoOperation op = m_undoStack.constLast();
+    UndoOperation retry;
+    retry.type = op.type;
+    retry.move = op.move;
     QStringList restoredPaths;
     QStringList failedPaths;
 
     switch (op.type) {
     case UndoOperation::Type::Create:
-        for (const QString &path : op.targetPaths) {
-            if (!deletePathForUndo(path))
+        for (int i = 0; i < op.targetPaths.size(); ++i) {
+            const QString path = op.targetPaths.at(i);
+            if (!deletePathForUndo(path)) {
                 failedPaths << path;
+                retry.targetPaths << path;
+            }
         }
         break;
 
@@ -3714,6 +3927,9 @@ void DesktopCanvas::undoLastOperation()
                 }
             } else {
                 failedPaths << newPath;
+                retry.sourcePaths << oldPath;
+                retry.targetPaths << newPath;
+                retry.fenceIds << op.fenceIds.value(i);
             }
         }
         break;
@@ -3723,6 +3939,8 @@ void DesktopCanvas::undoLastOperation()
             const QString restored = restoreTrashedPath(op.sourcePaths.value(i));
             if (restored.isEmpty()) {
                 failedPaths << op.sourcePaths.value(i);
+                retry.sourcePaths << op.sourcePaths.value(i);
+                retry.fenceIds << op.fenceIds.value(i);
                 continue;
             }
 
@@ -3744,6 +3962,9 @@ void DesktopCanvas::undoLastOperation()
                 const QString source = op.sourcePaths.value(i);
                 if (source.isEmpty() || !movePathForUndo(placed, source)) {
                     failedPaths << placed;
+                    retry.sourcePaths << source;
+                    retry.targetPaths << placed;
+                    retry.fenceIds << op.fenceIds.value(i);
                     continue;
                 }
                 restoredPaths << source;
@@ -3756,13 +3977,24 @@ void DesktopCanvas::undoLastOperation()
                 }
             }
         } else {
-            for (const QString &path : op.targetPaths) {
-                if (!deletePathForUndo(path))
+            for (int i = 0; i < op.targetPaths.size(); ++i) {
+                const QString path = op.targetPaths.at(i);
+                if (!deletePathForUndo(path)) {
                     failedPaths << path;
+                    retry.sourcePaths << op.sourcePaths.value(i);
+                    retry.targetPaths << path;
+                    retry.fenceIds << op.fenceIds.value(i);
+                }
             }
         }
         break;
     }
+
+    // 成功项移出撤销栈；只把失败子集放回栈顶，用户解决
+    // 同名冲突或权限问题后可以继续重试。
+    m_undoStack.removeLast();
+    if (!retry.sourcePaths.isEmpty() || !retry.targetPaths.isEmpty())
+        m_undoStack.append(retry);
 
     refreshDesktopIcons();
     for (const QString &path : restoredPaths) {
@@ -3776,8 +4008,13 @@ void DesktopCanvas::undoLastOperation()
     saveLayout();
 
     if (!failedPaths.isEmpty()) {
+        qWarning().noquote()
+            << "ukui-fences undo retained failed paths:"
+            << failedPaths.join(QStringLiteral(" | "));
         QMessageBox::warning(this, "撤回失败",
-            QString("有 %1 个项目无法撤回。").arg(failedPaths.size()));
+            QString("有 %1 个项目无法撤回。\n"
+                    "撤回记录已保留，解决同名文件或权限问题后可再试。")
+                .arg(failedPaths.size()));
     }
 }
 
@@ -3858,6 +4095,8 @@ FenceWidget *DesktopCanvas::createFence(const QString &title, const QRect &geo)
             this, &DesktopCanvas::handleFilesTransferred);
     connect(fence, &FenceWidget::dragOperationFinished,
             this, &DesktopCanvas::handleDragOperationFinished);
+    connect(fence, &FenceWidget::dragSourcesPrepared,
+            this, &DesktopCanvas::rememberDragSources);
     connect(fence, &FenceWidget::filesTrashed,
             this, [this, fence](const QStringList &paths) {
         recordTrashUndo(paths, fence);

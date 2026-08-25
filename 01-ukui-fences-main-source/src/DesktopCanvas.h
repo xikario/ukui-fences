@@ -10,6 +10,7 @@
 #include <QString>
 #include <QStringList>
 #include <QFont>
+#include <QHash>
 #include <QColor>
 #include <QImage>
 #include "DesktopItem.h"
@@ -230,6 +231,8 @@ private:
     void handleFilesTransferred(const QStringList &sourcePaths,
                                 const QStringList &targetPaths,
                                 bool move);
+    void rememberDragSources(const QStringList &paths);
+    void findExternalMoveTargets(const QStringList &paths, int attempt = 0);
     void handleDragOperationFinished(const QStringList &paths,
                                      Qt::DropAction action);
     bool pruneMissingFileIcons();
@@ -257,6 +260,8 @@ private:
     DesktopIcon        *m_selectionAnchor = nullptr;
     QMap<QString, QPoint> m_looseIconPositions;
     QList<UndoOperation>  m_undoStack;
+    QHash<QString, QPair<quint64, quint64>> m_dragFileIdentities;
+    QHash<QString, QString> m_dragSourceFenceIds;
     QFileSystemWatcher *m_watcher   = nullptr;
     QTimer             *m_debounce  = nullptr;
     QTimer             *m_desktopSyncTimer = nullptr;
