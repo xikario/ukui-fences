@@ -11,6 +11,7 @@
 #include "DesktopItem.h"
 
 class QLineEdit;
+class QDragLeaveEvent;
 
 class DesktopIcon : public QWidget
 {
@@ -48,6 +49,11 @@ signals:
     void copyRequested(DesktopIcon *self, bool move);
     void systemIconMoved(DesktopIcon *self, const QPoint &newPos);
     void filesDroppedToTrash(const QStringList &paths);
+    void filesTransferred(const QStringList &sourcePaths,
+                          const QStringList &targetPaths,
+                          bool move);
+    void dragOperationFinished(const QStringList &paths,
+                               Qt::DropAction action);
 
 protected:
     void paintEvent(QPaintEvent *)          override;
@@ -60,6 +66,7 @@ protected:
     void leaveEvent(QEvent *)  override;
     void dragEnterEvent(QDragEnterEvent *) override;
     void dragMoveEvent(QDragMoveEvent *)   override;
+    void dragLeaveEvent(QDragLeaveEvent *) override;
     void dropEvent(QDropEvent *)           override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -72,6 +79,7 @@ private:
     bool        m_selected  = false;
     bool        m_cut       = false;
     bool        m_hovered   = false;
+    bool        m_draggingVisual = false;
     QPoint      m_dragStart;
     QPoint      m_dragGlobalStart;
     QPoint      m_widgetStart;
@@ -96,14 +104,7 @@ private:
     QLineEdit  *m_renameEdit = nullptr;
     bool        m_finishingRename = false;
 
-    // 刷新闪烁动画
-    bool        m_refreshBlink = false;
-    qreal       m_refreshBlinkProgress = 0.0;
-    QTimer      m_refreshBlinkTimer;
-
     static constexpr int ICON_SIZE = 48;
     static constexpr int CELL_W    = 80;
     static constexpr int CELL_H    = 104;
-public:
-    void triggerRefreshBlink();
 };

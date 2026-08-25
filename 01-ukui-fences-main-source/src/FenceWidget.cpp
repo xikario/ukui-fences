@@ -10,6 +10,7 @@
 #include <QContextMenuEvent>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
+#include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QDateTime>
 #include <QMimeData>
@@ -117,6 +118,33 @@ QString primaryDesktopDirectory()
     addExistingDirectory(paths, QDir::homePath() + "/桌面");
     addExistingDirectory(paths, QDir::homePath() + "/Desktop");
     return paths.isEmpty() ? QDir::homePath() : paths.first();
+}
+
+Qt::DropAction requestedDropAction(const QDropEvent *event,
+                                   Qt::DropAction fallback)
+{
+    if (!event)
+        return fallback;
+
+    const Qt::DropActions possible = event->possibleActions();
+    if ((event->keyboardModifiers() & Qt::ControlModifier) &&
+        (possible & Qt::CopyAction))
+        return Qt::CopyAction;
+    if ((event->keyboardModifiers() & Qt::ShiftModifier) &&
+        (possible & Qt::MoveAction))
+        return Qt::MoveAction;
+
+    const Qt::DropAction proposed = event->proposedAction();
+    if ((proposed == Qt::CopyAction || proposed == Qt::MoveAction) &&
+        (possible & proposed))
+        return proposed;
+    if (possible & fallback)
+        return fallback;
+    if (possible & Qt::CopyAction)
+        return Qt::CopyAction;
+    if (possible & Qt::MoveAction)
+        return Qt::MoveAction;
+    return Qt::IgnoreAction;
 }
 
 } // namespace
@@ -593,6 +621,17 @@ void FenceWidget::insertItem(const DesktopItem &item, int index)
         emit filesTrashed(paths);
         emit geometryChanged();
     });
+    connect(icon, &DesktopIcon::filesTransferred,
+            this, [this](const QStringList &sourcePaths,
+                         const QStringList &targetPaths,
+                         bool move) {
+        emit filesTransferred(sourcePaths, targetPaths, move);
+    });
+    connect(icon, &DesktopIcon::dragOperationFinished,
+            this, [this](const QStringList &paths,
+                         Qt::DropAction action) {
+        emit dragOperationFinished(paths, action);
+    });
     m_icons.insert(qBound(0, index, m_icons.size()), icon);
     applyEffectiveIconFont(icon);
     if (item.isSystemIcon && item.filePath == QLatin1String("trash:///"))
@@ -602,7 +641,7 @@ void FenceWidget::insertItem(const DesktopItem &item, int index)
     layoutIcons();
     QSet<QString> cutPaths;
     for (const QString &path : FileClipboard::currentCutPaths())
-        cutPaths.insert(QFileInfo(path).absoluteFilePath());
+        cutPaths.insert(normalizedStoredPath(path));
     syncCutVisualState(cutPaths);
 }
 
@@ -1460,6 +1499,41 @@ void FenceWidget::paintEvent(QPaintEvent *)
         drawHandles(p);
     }
 
+    // 拖动时立即显示将要落入的网格位置，避免松手后才突然重排。
+    if (!m_collapsed && m_dropPreviewIndex >= 0 && !m_embeddedWidget) {
+        const int iconW = qRound(ICON_W * m_iconScale);
+        const int iconH = qRound(ICON_H * m_iconScale);
+        const int cols = iconColumnCount(iconW);
+        const int index = qBound(0, m_dropPreviewIndex, m_icons.size());
+        const int col = index % cols;
+        const int row = index / cols;
+        QRect targetRect(
+            magneticContentInset() + col * (iconW + ICON_GAP),
+            contentTop() + row * (iconH + ICON_GAP) - m_scrollOffset,
+            iconW,
+            iconH);
+        targetRect = targetRect.intersected(
+            rect().adjusted(0, contentTop(), 0, -CONTENT_BOTTOM_GAP));
+        if (targetRect.isValid()) {
+            const QColor accent = m_dropPreviewCopy
+                ? QColor(52, 211, 153, 210)
+                : QColor(96, 165, 250, 210);
+            p.setPen(QPen(accent, 2, Qt::DashLine));
+            p.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 35));
+            p.drawRoundedRect(targetRect.adjusted(2, 2, -2, -2), 8, 8);
+            if (m_dropPreviewCopy) {
+                QFont copyFont = p.font();
+                copyFont.setBold(true);
+                copyFont.setPixelSize(16);
+                p.setFont(copyFont);
+                p.setPen(accent);
+                p.drawText(targetRect.adjusted(0, 2, -5, 0),
+                           Qt::AlignTop | Qt::AlignRight,
+                           QStringLiteral("+"));
+            }
+        }
+    }
+
     // 吸附辅助线（画在最上层）
     if (!m_snapGuides.isEmpty())
         drawSnapGuides(p);
@@ -1914,26 +1988,80 @@ void FenceWidget::contextMenuEvent(QContextMenuEvent *e)
 
 void FenceWidget::dragEnterEvent(QDragEnterEvent *e)
 {
-    if (e->mimeData()->hasUrls() ||
-        e->mimeData()->hasFormat("application/x-kyfences-sysicon")) {
-        if (e->mimeData()->hasFormat(kInternalFileDragMime))
-            e->setDropAction(Qt::MoveAction);
+    if (e->mimeData()->hasFormat("application/x-kyfences-sysicon")) {
+        e->setDropAction(Qt::MoveAction);
         e->accept();
+        return;
     }
+    if (!e->mimeData()->hasUrls()) {
+        e->ignore();
+        return;
+    }
+
+    const bool internal = e->mimeData()->hasFormat(kInternalFileDragMime);
+    const Qt::DropAction action = requestedDropAction(
+        e, internal ? Qt::MoveAction : Qt::CopyAction);
+    if (action == Qt::IgnoreAction) {
+        e->ignore();
+        return;
+    }
+    m_dropPreviewIndex = dropInsertionIndex(e->pos());
+    m_dropPreviewCopy = action == Qt::CopyAction;
+    update();
+    e->setDropAction(action);
+    e->accept();
 }
 
 void FenceWidget::dragMoveEvent(QDragMoveEvent *e)
 {
-    if (e->mimeData()->hasUrls() ||
-        e->mimeData()->hasFormat("application/x-kyfences-sysicon")) {
-        if (e->mimeData()->hasFormat(kInternalFileDragMime))
-            e->setDropAction(Qt::MoveAction);
+    if (e->mimeData()->hasFormat("application/x-kyfences-sysicon")) {
+        m_dropPreviewIndex = dropInsertionIndex(e->pos());
+        m_dropPreviewCopy = false;
+        update();
+        e->setDropAction(Qt::MoveAction);
         e->accept();
+        return;
     }
+    if (!e->mimeData()->hasUrls()) {
+        e->ignore();
+        return;
+    }
+
+    const bool internal = e->mimeData()->hasFormat(kInternalFileDragMime);
+    const Qt::DropAction action = requestedDropAction(
+        e, internal ? Qt::MoveAction : Qt::CopyAction);
+    if (action == Qt::IgnoreAction) {
+        e->ignore();
+        return;
+    }
+    const int previewIndex = dropInsertionIndex(e->pos());
+    const bool previewCopy = action == Qt::CopyAction;
+    if (previewIndex != m_dropPreviewIndex ||
+        previewCopy != m_dropPreviewCopy) {
+        m_dropPreviewIndex = previewIndex;
+        m_dropPreviewCopy = previewCopy;
+        update();
+    }
+    e->setDropAction(action);
+    e->accept();
+}
+
+void FenceWidget::dragLeaveEvent(QDragLeaveEvent *e)
+{
+    m_dropPreviewIndex = -1;
+    m_dropPreviewCopy = false;
+    update();
+    e->accept();
 }
 
 void FenceWidget::dropEvent(QDropEvent *e)
 {
+    const int targetIndex = m_dropPreviewIndex >= 0
+        ? m_dropPreviewIndex : dropInsertionIndex(e->pos());
+    m_dropPreviewIndex = -1;
+    m_dropPreviewCopy = false;
+    update();
+
     if (e->mimeData()->hasFormat("application/x-kyfences-sysicon")) {
         const QString path = QString::fromUtf8(
             e->mimeData()->data("application/x-kyfences-sysicon")).trimmed();
@@ -1942,14 +2070,14 @@ void FenceWidget::dropEvent(QDropEvent *e)
             if (auto *sourceIcon = qobject_cast<DesktopIcon *>(e->source())) {
                 if (iconBelongsToThisFence(sourceIcon)) {
                     moveItemsToIndex(QStringList() << path,
-                                     dropInsertionIndex(e->pos()));
+                                     targetIndex);
                     e->setDropAction(Qt::MoveAction);
                     e->accept();
                     return;
                 }
             }
 
-            insertItem(item, dropInsertionIndex(e->pos()));
+            insertItem(item, targetIndex);
             emit fileDropped(item.filePath);
             e->acceptProposedAction();
             return;
@@ -1970,71 +2098,84 @@ void FenceWidget::dropEvent(QDropEvent *e)
         return;
     }
 
-    if (auto *sourceIcon = qobject_cast<DesktopIcon *>(e->source())) {
-        if (iconBelongsToThisFence(sourceIcon)) {
-            moveItemsToIndex(paths, dropInsertionIndex(e->pos()));
-            e->setDropAction(Qt::MoveAction);
-            e->accept();
-            return;
+    const bool internal =
+        e->mimeData()->hasFormat(kInternalFileDragMime);
+    const Qt::DropAction action = requestedDropAction(
+        e, internal ? Qt::MoveAction : Qt::CopyAction);
+    if (action == Qt::IgnoreAction) {
+        e->ignore();
+        return;
+    }
+
+    if (action == Qt::MoveAction) {
+        if (auto *sourceIcon = qobject_cast<DesktopIcon *>(e->source())) {
+            if (iconBelongsToThisFence(sourceIcon)) {
+                moveItemsToIndex(paths, targetIndex);
+                e->setDropAction(Qt::MoveAction);
+                e->accept();
+                return;
+            }
         }
     }
 
-    const bool internal =
-        e->mimeData()->hasFormat(kInternalFileDragMime);
-    Qt::DropAction action = e->dropAction();
-    if (action == Qt::IgnoreAction)
-        action = e->proposedAction();
-    if (action == Qt::IgnoreAction)
-        action = Qt::CopyAction;
-    const bool moveExternal = action == Qt::MoveAction;
+    const bool moveFiles = action == Qt::MoveAction;
     const QString desktopPath = primaryDesktopDirectory();
     QStringList transferredSources;
     QStringList transferredTargets;
     QStringList failedPaths;
 
-    int insertAt = dropInsertionIndex(e->pos());
+    int insertAt = targetIndex;
     bool placedAny = false;
     for (const QString &path : paths) {
-        QString itemPath = path;
-        if (!internal &&
-            !FileClipboard::isInDirectory(path, desktopPath)) {
-            const QFileInfo source(path);
+        const QFileInfo source(path);
+        if (!source.exists()) {
+            failedPaths << path;
+            continue;
+        }
+
+        QString itemPath = source.absoluteFilePath();
+        const bool needsFileTransfer =
+            action == Qt::CopyAction ||
+            (!internal &&
+             !FileClipboard::isInDirectory(itemPath, desktopPath));
+        if (needsFileTransfer) {
             const QString target = FileClipboard::uniqueTargetPath(
                 desktopPath, source.fileName());
             if (!FileClipboard::transferPath(
-                    source.absoluteFilePath(), target, moveExternal)) {
-                failedPaths << source.absoluteFilePath();
+                    itemPath, target, moveFiles)) {
+                failedPaths << itemPath;
                 continue;
             }
+            transferredSources << itemPath;
             itemPath = QFileInfo(target).absoluteFilePath();
-            transferredSources << source.absoluteFilePath();
             transferredTargets << itemPath;
         }
 
         DesktopItem item = DesktopItem::fromStoredPath(itemPath);
-        if (!item.isValid())
+        if (!item.isValid()) {
+            failedPaths << itemPath;
             continue;
+        }
         insertItem(item, insertAt++);
         emit fileDropped(item.filePath);
         placedAny = true;
     }
 
     if (!transferredTargets.isEmpty()) {
-        emit filesPasted(transferredSources, transferredTargets, moveExternal);
+        emit filesPasted(transferredSources, transferredTargets, moveFiles);
     }
     if (!failedPaths.isEmpty()) {
         QMessageBox::warning(this, "拖放失败",
             QString("有 %1 个项目无法放入分区。").arg(failedPaths.size()));
     }
 
-    if (internal || moveExternal)
-        e->setDropAction(Qt::MoveAction);
-    else
-        e->setDropAction(Qt::CopyAction);
-    if (placedAny)
+    e->setDropAction(action);
+    if (placedAny) {
         e->accept();
-    else
+        emit geometryChanged();
+    } else {
         e->ignore();
+    }
 }
 
 // ── 分区字体设置对话框 ─────────────────────────────────

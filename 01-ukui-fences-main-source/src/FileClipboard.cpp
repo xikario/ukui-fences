@@ -37,6 +37,17 @@ bool copyPath(const QString &srcPath, const QString &targetPath)
     const QFileInfo src(srcPath);
     if (!src.exists()) return false;
 
+    if (src.isDir()) {
+        QString sourceRoot = QDir::cleanPath(src.absoluteFilePath());
+        if (!sourceRoot.endsWith(QDir::separator()))
+            sourceRoot += QDir::separator();
+        const QString target = QDir::cleanPath(
+            QFileInfo(targetPath).absoluteFilePath());
+        if (target == QDir::cleanPath(src.absoluteFilePath()) ||
+            target.startsWith(sourceRoot))
+            return false;
+    }
+
     QDir().mkpath(QFileInfo(targetPath).absolutePath());
 
     if (src.isDir()) {
@@ -52,6 +63,17 @@ bool movePath(const QString &srcPath, const QString &targetPath)
 {
     const QFileInfo src(srcPath);
     if (!src.exists()) return false;
+
+    if (src.isDir()) {
+        QString sourceRoot = QDir::cleanPath(src.absoluteFilePath());
+        if (!sourceRoot.endsWith(QDir::separator()))
+            sourceRoot += QDir::separator();
+        const QString target = QDir::cleanPath(
+            QFileInfo(targetPath).absoluteFilePath());
+        if (target == QDir::cleanPath(src.absoluteFilePath()) ||
+            target.startsWith(sourceRoot))
+            return false;
+    }
 
     QDir().mkpath(QFileInfo(targetPath).absolutePath());
 

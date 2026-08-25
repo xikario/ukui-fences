@@ -15,6 +15,7 @@
 class DesktopIcon;
 class QKeyEvent;
 class QWheelEvent;
+class QDragLeaveEvent;
 
 class FenceWidget : public QWidget
 {
@@ -72,6 +73,11 @@ signals:
     void filesPasted(const QStringList &sourcePaths,
                      const QStringList &placedPaths,
                      bool move);
+    void filesTransferred(const QStringList &sourcePaths,
+                          const QStringList &targetPaths,
+                          bool move);
+    void dragOperationFinished(const QStringList &paths,
+                               Qt::DropAction action);
     void fileCreated(const QString &path);
 
 protected:
@@ -83,6 +89,7 @@ protected:
     void contextMenuEvent(QContextMenuEvent *) override;
     void dragEnterEvent(QDragEnterEvent *)    override;
     void dragMoveEvent(QDragMoveEvent *)      override;
+    void dragLeaveEvent(QDragLeaveEvent *)    override;
     void dropEvent(QDropEvent *)              override;
     void keyPressEvent(QKeyEvent *)           override;
     void resizeEvent(QResizeEvent *)          override;
@@ -154,6 +161,8 @@ private:
     qreal    m_iconScale = 1.0;
     int      m_scrollOffset = 0;
     int      m_contentHeight = 0;
+    int      m_dropPreviewIndex = -1;
+    bool     m_dropPreviewCopy = false;
     QString  m_titleIconPath;
     QIcon    m_titleIcon;
     QWidget *m_iconViewport = nullptr;

@@ -9,6 +9,7 @@
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
+#include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QEvent>
 #include <QMimeData>
@@ -54,39 +55,115 @@ bool pathIsInside(const QString &path, const QString &directory)
     return cleanPath.startsWith(cleanDirectory);
 }
 
-bool transferPathToDirectory(const QString &sourcePath,
-                             const QString &directory,
-                             bool move)
+QString transferPathToDirectory(const QString &sourcePath,
+                                const QString &directory,
+                                bool move)
 {
     const QFileInfo source(sourcePath);
     if (!source.exists() || !QFileInfo(directory).isDir())
-        return false;
+        return {};
 
     const QString normalizedSource = source.absoluteFilePath();
     const QString normalizedDirectory =
         QFileInfo(directory).absoluteFilePath();
-    if (FileClipboard::isInDirectory(normalizedSource, normalizedDirectory))
-        return true;
-    if (source.isDir() && pathIsInside(normalizedDirectory, normalizedSource))
-        return false;
+    if (move &&
+        FileClipboard::isInDirectory(normalizedSource, normalizedDirectory))
+        return normalizedSource;
+    if (source.isDir() &&
+        (QDir::cleanPath(normalizedDirectory) ==
+             QDir::cleanPath(normalizedSource) ||
+         pathIsInside(normalizedDirectory, normalizedSource)))
+        return {};
 
     const QString target = FileClipboard::uniqueTargetPath(
         normalizedDirectory, source.fileName());
     if (move) {
-        return QProcess::execute(QStringLiteral("gio"),
+        const bool ok = QProcess::execute(QStringLiteral("gio"),
             QStringList() << QStringLiteral("move")
                           << QStringLiteral("-T")
                           << normalizedSource
                           << target) == 0;
+        return ok ? QFileInfo(target).absoluteFilePath() : QString();
     }
 
     if (source.isDir()) {
-        return QProcess::execute(QStringLiteral("cp"),
+        const bool ok = QProcess::execute(QStringLiteral("cp"),
             QStringList() << QStringLiteral("-aT")
                           << normalizedSource
                           << target) == 0;
+        return ok ? QFileInfo(target).absoluteFilePath() : QString();
     }
-    return QFile::copy(normalizedSource, target);
+    return QFile::copy(normalizedSource, target)
+        ? QFileInfo(target).absoluteFilePath() : QString();
+}
+
+Qt::DropAction requestedDropAction(const QDropEvent *event,
+                                   Qt::DropAction fallback)
+{
+    if (!event)
+        return fallback;
+
+    const Qt::DropActions possible = event->possibleActions();
+    if ((event->keyboardModifiers() & Qt::ControlModifier) &&
+        (possible & Qt::CopyAction))
+        return Qt::CopyAction;
+    if ((event->keyboardModifiers() & Qt::ShiftModifier) &&
+        (possible & Qt::MoveAction))
+        return Qt::MoveAction;
+
+    const Qt::DropAction proposed = event->proposedAction();
+    if ((proposed == Qt::CopyAction || proposed == Qt::MoveAction) &&
+        (possible & proposed))
+        return proposed;
+    if (possible & fallback)
+        return fallback;
+    if (possible & Qt::CopyAction)
+        return Qt::CopyAction;
+    if (possible & Qt::MoveAction)
+        return Qt::MoveAction;
+    return Qt::IgnoreAction;
+}
+
+QRect folderDropHotRect(const QWidget *widget, int iconSize)
+{
+    if (!widget)
+        return {};
+    const int padding = qMax(6, iconSize / 8);
+    return QRect((widget->width() - iconSize) / 2 - padding,
+                 qMax(0, 6 - padding),
+                 iconSize + padding * 2,
+                 iconSize + padding * 2);
+}
+
+QPixmap dragPreviewPixmap(const QIcon &icon, int iconSize, int count)
+{
+    const int canvasSize = qMax(64, iconSize + 18);
+    QPixmap preview(canvasSize, canvasSize);
+    preview.fill(Qt::transparent);
+
+    QPainter painter(&preview);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const int iconOffset = 8;
+    painter.drawPixmap(iconOffset, iconOffset,
+        icon.pixmap(iconSize, iconSize));
+
+    if (count > 1) {
+        const QString text = count > 99 ? QStringLiteral("99+")
+                                        : QString::number(count);
+        QFont font = painter.font();
+        font.setBold(true);
+        font.setPixelSize(11);
+        painter.setFont(font);
+        const QFontMetrics metrics(font);
+        const int badgeW = qMax(22, metrics.horizontalAdvance(text) + 10);
+        const QRect badge(canvasSize - badgeW - 2, 2, badgeW, 22);
+        painter.setPen(QPen(Qt::white, 1));
+        painter.setBrush(QColor(35, 110, 230, 235));
+        painter.drawRoundedRect(badge, 11, 11);
+        painter.drawText(badge, Qt::AlignCenter, text);
+    }
+
+    return preview;
 }
 
 QString findExecutable(const QStringList &names)
@@ -383,16 +460,6 @@ DesktopIcon::DesktopIcon(const DesktopItem &item, QWidget *parent)
     connect(&m_renameTimer, &QTimer::timeout,
             this, [this] { startInlineRename(); });
 
-    m_refreshBlinkTimer.setInterval(15);
-    connect(&m_refreshBlinkTimer, &QTimer::timeout, this, [this] {
-        m_refreshBlinkProgress += 0.08;
-        if (m_refreshBlinkProgress >= 1.0) {
-            m_refreshBlink = false;
-            m_refreshBlinkProgress = 0.0;
-            m_refreshBlinkTimer.stop();
-        }
-        update();
-    });
 }
 
 DesktopIcon::~DesktopIcon()
@@ -625,6 +692,8 @@ void DesktopIcon::paintEvent(QPaintEvent *)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::SmoothPixmapTransform);
+    if (m_draggingVisual)
+        p.setOpacity(0.36);
 
     const int w = width(), h = height();
 
@@ -713,20 +782,6 @@ void DesktopIcon::paintEvent(QPaintEvent *)
     p.setPen(textColor);
     p.drawText(textRect, flags, m_item.displayName);
 
-    if (m_refreshBlink) {
-        p.save();
-        p.setPen(Qt::NoPen);
-        int alpha = 0;
-        double t = m_refreshBlinkProgress;
-        if (t < 0.25) {
-            alpha = qRound(150.0 * (t / 0.25));
-        } else {
-            alpha = qRound(150.0 * (1.0 - (t - 0.25) / 0.75));
-        }
-        p.setBrush(QColor(255, 255, 255, qBound(0, alpha, 150)));
-        p.drawRoundedRect(rect(), 8, 8);
-        p.restore();
-    }
 }
 
 // ── 鼠标事件 ─────────────────────────────────────────────
@@ -770,14 +825,21 @@ void DesktopIcon::mouseMoveEvent(QMouseEvent *e)
     if ((e->pos() - m_dragStart).manhattanLength()
             < QApplication::startDragDistance()) return;
     m_renameTimer.stop();
+    m_clickAnimTimer.stop();
+    m_clickAnim = false;
+    m_clickAnimProgress = 0.0;
     if (m_item.isSystemIcon) {
         auto *drag = new QDrag(this);
         auto *mime = new QMimeData;
         mime->setData(kSystemIconMime, m_item.filePath.toUtf8());
         drag->setMimeData(mime);
-        drag->setPixmap(m_item.icon.pixmap(m_iconSize, m_iconSize));
-        drag->setHotSpot(QPoint(m_iconSize / 2, m_iconSize / 2));
+        drag->setPixmap(dragPreviewPixmap(m_item.icon, m_iconSize, 1));
+        drag->setHotSpot(QPoint(10, 10));
+        m_draggingVisual = true;
+        update();
         drag->exec(Qt::MoveAction);
+        m_draggingVisual = false;
+        update();
         e->accept();
         return;
     }
@@ -791,27 +853,24 @@ void DesktopIcon::mouseMoveEvent(QMouseEvent *e)
     mime->setUrls(urls);
     mime->setData(kInternalFileDragMime, QByteArrayLiteral("1"));
     drag->setMimeData(mime);
-    drag->setPixmap(m_item.icon.pixmap(m_iconSize, m_iconSize));
-    drag->setHotSpot(QPoint(m_iconSize / 2, m_iconSize / 2));
+    drag->setPixmap(dragPreviewPixmap(m_item.icon, m_iconSize, urls.size()));
+    // X11 原生拖影在热点位于图像正下方时容易显得滞后；让鼠标位于
+    // 拖影左上角的透明边距中，视觉跟随更稳定。
+    drag->setHotSpot(QPoint(10, 10));
+    m_draggingVisual = true;
+    update();
     const Qt::DropAction action =
         drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
-    if (action == Qt::MoveAction) {
-        QStringList draggedPaths;
-        for (const QUrl &url : urls) {
-            const QString path = url.toLocalFile();
-            if (!path.isEmpty() && !draggedPaths.contains(path))
-                draggedPaths << path;
-        }
+    m_draggingVisual = false;
+    update();
 
-        auto notifyRemoved = [this, draggedPaths] {
-            for (const QString &path : draggedPaths) {
-                if (!QFileInfo::exists(path))
-                    emit fileRemoved(path);
-            }
-        };
-        QTimer::singleShot(350, this, notifyRemoved);
-        QTimer::singleShot(1400, this, notifyRemoved);
+    QStringList draggedPaths;
+    for (const QUrl &url : urls) {
+        const QString path = url.toLocalFile();
+        if (!path.isEmpty() && !draggedPaths.contains(path))
+            draggedPaths << path;
     }
+    emit dragOperationFinished(draggedPaths, action);
     e->accept();
 }
 
@@ -1025,11 +1084,17 @@ void DesktopIcon::dragEnterEvent(QDragEnterEvent *e)
         }
     }
     if (m_item.isDir && !m_item.isSystemIcon && e->mimeData()->hasUrls()) {
+        if (!folderDropHotRect(this, m_iconSize).contains(e->pos())) {
+            e->ignore();
+            return;
+        }
         const Qt::DropAction action =
-            e->mimeData()->hasFormat(kInternalFileDragMime)
-                ? Qt::MoveAction : e->proposedAction();
-        e->setDropAction(action == Qt::IgnoreAction
-            ? Qt::MoveAction : action);
+            requestedDropAction(e, Qt::MoveAction);
+        if (action == Qt::IgnoreAction) {
+            e->ignore();
+            return;
+        }
+        e->setDropAction(action);
         e->accept();
         m_hovered = true;
         update();
@@ -1049,15 +1114,38 @@ void DesktopIcon::dragMoveEvent(QDragMoveEvent *e)
         }
     }
     if (m_item.isDir && !m_item.isSystemIcon && e->mimeData()->hasUrls()) {
+        if (!folderDropHotRect(this, m_iconSize).contains(e->pos())) {
+            if (m_hovered) {
+                m_hovered = false;
+                update();
+            }
+            e->ignore();
+            return;
+        }
         const Qt::DropAction action =
-            e->mimeData()->hasFormat(kInternalFileDragMime)
-                ? Qt::MoveAction : e->proposedAction();
-        e->setDropAction(action == Qt::IgnoreAction
-            ? Qt::MoveAction : action);
+            requestedDropAction(e, Qt::MoveAction);
+        if (action == Qt::IgnoreAction) {
+            e->ignore();
+            return;
+        }
+        e->setDropAction(action);
+        if (!m_hovered) {
+            m_hovered = true;
+            update();
+        }
         e->accept();
         return;
     }
     e->ignore();
+}
+
+void DesktopIcon::dragLeaveEvent(QDragLeaveEvent *e)
+{
+    if (m_hovered) {
+        m_hovered = false;
+        update();
+    }
+    e->accept();
 }
 
 void DesktopIcon::dropEvent(QDropEvent *e)
@@ -1100,24 +1188,38 @@ void DesktopIcon::dropEvent(QDropEvent *e)
         return;
     }
     if (m_item.isDir && !m_item.isSystemIcon && e->mimeData()->hasUrls()) {
-        const bool internal =
-            e->mimeData()->hasFormat(kInternalFileDragMime);
-        Qt::DropAction action =
-            internal ? Qt::MoveAction : e->proposedAction();
-        if (action == Qt::IgnoreAction)
-            action = Qt::MoveAction;
+        if (!folderDropHotRect(this, m_iconSize).contains(e->pos())) {
+            e->ignore();
+            update();
+            return;
+        }
+        const Qt::DropAction action =
+            requestedDropAction(e, Qt::MoveAction);
+        if (action == Qt::IgnoreAction) {
+            e->ignore();
+            update();
+            return;
+        }
 
         QStringList failedPaths;
+        QStringList transferredSources;
+        QStringList transferredTargets;
         bool transferredAny = false;
         for (const QUrl &url : e->mimeData()->urls()) {
             const QString path = url.toLocalFile();
             if (path.isEmpty())
                 continue;
-            if (transferPathToDirectory(
-                    path, m_item.filePath, action == Qt::MoveAction)) {
+            const QString source = QFileInfo(path).absoluteFilePath();
+            const QString placed = transferPathToDirectory(
+                source, m_item.filePath, action == Qt::MoveAction);
+            if (!placed.isEmpty()) {
                 transferredAny = true;
+                if (placed != source) {
+                    transferredSources << source;
+                    transferredTargets << placed;
+                }
             } else {
-                failedPaths << path;
+                failedPaths << source;
             }
         }
 
@@ -1130,6 +1232,10 @@ void DesktopIcon::dropEvent(QDropEvent *e)
         if (transferredAny) {
             e->setDropAction(action);
             e->accept();
+            if (!transferredTargets.isEmpty())
+                emit filesTransferred(transferredSources,
+                                      transferredTargets,
+                                      action == Qt::MoveAction);
         } else {
             e->ignore();
         }
@@ -1160,12 +1266,4 @@ void DesktopIcon::refreshTrashIcon()
         proc->deleteLater();
     });
     proc->start("gio", QStringList() << "list" << "trash:///");
-}
-
-void DesktopIcon::triggerRefreshBlink()
-{
-    m_refreshBlink = true;
-    m_refreshBlinkProgress = 0.0;
-    m_refreshBlinkTimer.start();
-    update();
 }

@@ -22,6 +22,7 @@ class SmartSpaceWidget;
 class QFileSystemWatcher;
 class QDragEnterEvent;
 class QDragMoveEvent;
+class QDragLeaveEvent;
 class QDropEvent;
 class QKeyEvent;
 class QMoveEvent;
@@ -98,6 +99,7 @@ protected:
     void resizeEvent(QResizeEvent *)         override;
     void dragEnterEvent(QDragEnterEvent *) override;
     void dragMoveEvent(QDragMoveEvent *) override;
+    void dragLeaveEvent(QDragLeaveEvent *) override;
     void dropEvent(QDropEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
     void wheelEvent(QWheelEvent *) override;
@@ -225,6 +227,11 @@ private:
     void refreshTrashState();
     void syncCutVisualState();
     void removePathsFromAllViews(const QStringList &paths);
+    void handleFilesTransferred(const QStringList &sourcePaths,
+                                const QStringList &targetPaths,
+                                bool move);
+    void handleDragOperationFinished(const QStringList &paths,
+                                     Qt::DropAction action);
     bool pruneMissingFileIcons();
     void updateCutPathWatches(const QStringList &cutPaths);
     void refreshDesktopDirectories();
@@ -258,8 +265,8 @@ private:
     QList<QWidget*>     m_hotCornerGuards;
     QSet<QString>       m_cutWatchPaths;
     QStringList         m_cutClipboardPaths;
-    qint64              m_cutClipboardStartedMs = 0;
-    int                 m_cutRefreshGraceTicks = 0;
+    QRect               m_dropPreviewRect;
+    bool                m_dropPreviewCopy = false;
     bool                m_editMode  = false;
     qreal               m_iconScale = 1.0;
     qreal               m_desktopIconScale = 1.0;

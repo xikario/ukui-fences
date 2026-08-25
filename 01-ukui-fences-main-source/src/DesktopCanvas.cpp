@@ -17,6 +17,7 @@
 #include <QContextMenuEvent>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
+#include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QClipboard>
 #include <QMouseEvent>
@@ -81,6 +82,8 @@ void releaseUnusedHeap()
 }
 
 constexpr const char *kSystemIconMime = "application/x-kyfences-sysicon";
+constexpr const char *kInternalFileDragMime =
+    "application/x-ukui-fences-file-drag";
 constexpr bool kDesktopSyncDiagnostics = false;
 constexpr int kHotCornerGuardSize = 10;
 
@@ -90,6 +93,33 @@ enum HotCorner {
     HotCornerBottomLeft = 2,
     HotCornerBottomRight = 3
 };
+
+Qt::DropAction requestedDropAction(const QDropEvent *event,
+                                   Qt::DropAction fallback)
+{
+    if (!event)
+        return fallback;
+
+    const Qt::DropActions possible = event->possibleActions();
+    if ((event->keyboardModifiers() & Qt::ControlModifier) &&
+        (possible & Qt::CopyAction))
+        return Qt::CopyAction;
+    if ((event->keyboardModifiers() & Qt::ShiftModifier) &&
+        (possible & Qt::MoveAction))
+        return Qt::MoveAction;
+
+    const Qt::DropAction proposed = event->proposedAction();
+    if ((proposed == Qt::CopyAction || proposed == Qt::MoveAction) &&
+        (possible & proposed))
+        return proposed;
+    if (possible & fallback)
+        return fallback;
+    if (possible & Qt::CopyAction)
+        return Qt::CopyAction;
+    if (possible & Qt::MoveAction)
+        return Qt::MoveAction;
+    return Qt::IgnoreAction;
+}
 
 QIcon fallbackMenuIcon(const QString &glyph,
                        const QColor &background = QColor("#334155"),
@@ -667,6 +697,9 @@ DesktopCanvas::DesktopCanvas(QWidget *parent)
     setMouseTracking(true);
     setAcceptDrops(true);
     setFocusPolicy(Qt::StrongFocus);
+    // 首帧完成布局前禁止子控件提交绘制，避免所有新图标以 QWidget 默认
+    // 坐标 (0, 0) 在左上角短暂出现。
+    setUpdatesEnabled(false);
 
     lockToDesktopGeometry();
     updateHotCornerGuards();
@@ -720,7 +753,9 @@ DesktopCanvas::DesktopCanvas(QWidget *parent)
     m_debounce->setInterval(180);
 
     m_desktopSyncTimer = new QTimer(this);
-    m_desktopSyncTimer->setInterval(1500);
+    // QFileSystemWatcher 仍是主路径；低频全量对账只负责漏事件兜底，避免
+    // 高频扫描和重排影响拖动流畅度。
+    m_desktopSyncTimer->setInterval(15000);
 
     m_cutRefreshTimer = new QTimer(this);
     m_cutRefreshTimer->setInterval(1000);
@@ -780,6 +815,9 @@ DesktopCanvas::DesktopCanvas(QWidget *parent)
 
     saveLayout();
     setFocus(Qt::OtherFocusReason);
+    m_desktopSyncTimer->start();
+    setUpdatesEnabled(true);
+    repaint();
 
     // 若用户启用了"随 Fences 自动启动系统监控"，则自动创建小组件
     if (SystemMonitor::autoStartEnabled()) {
@@ -835,7 +873,14 @@ void DesktopCanvas::setEditModeDBus(bool edit)
 
 void DesktopCanvas::refreshAll()
 {
-    restackDesktopLayer();
+    // F5 只是数据刷新，不应重新 show/raise 顶层桌面窗口。
+    // 重新映射桌面层会让窗口管理器在旧、新 backing store 之间
+    // 提交一帧，表现为图标附近的小黑框。层级恢复由会话启动和
+    // 显式显示路径负责，普通刷新只更新内容。
+    const bool updatesWereEnabled = updatesEnabled();
+    if (updatesWereEnabled)
+        setUpdatesEnabled(false);
+
     loadWallpaper();
     forceSyncDesktopIcons();
     refreshTrashState();
@@ -843,20 +888,11 @@ void DesktopCanvas::refreshAll()
     if (m_monitor)
         m_monitor->refreshWallpaperTheme();
 
-    // Windows 风格刷新：触发所有图标（包含 fences 里的）闪烁
-    for (DesktopIcon *icon : m_looseIcons) {
-        if (icon) icon->triggerRefreshBlink();
-    }
-    for (FenceWidget *fence : m_fences) {
-        if (fence) {
-            for (DesktopIcon *icon : fence->icons()) {
-                if (icon) icon->triggerRefreshBlink();
-            }
-        }
-    }
+    if (updatesWereEnabled)
+        setUpdatesEnabled(true);
 
-    // 同步刷新完成后用 repaint 确保 compositor 立即合成最终帧
-    repaint();
+    // 所有子控件与壁纸都就绪后，只提交最终帧。
+    update();
 }
 
 void DesktopCanvas::activateOnSessionStartup()
@@ -1481,6 +1517,10 @@ void DesktopCanvas::connectLooseIcon(DesktopIcon *icon)
         scheduleRefresh(1200);
         refreshTrashState();
     });
+    connect(icon, &DesktopIcon::filesTransferred,
+            this, &DesktopCanvas::handleFilesTransferred);
+    connect(icon, &DesktopIcon::dragOperationFinished,
+            this, &DesktopCanvas::handleDragOperationFinished);
     // 多文件拖动：当一个图标开始拖动时，把其他选中文件的 URL 也加入
     connect(icon, &DesktopIcon::dragStarted,
             this, [this](DesktopIcon * /* self */, QList<QUrl> *urls) {
@@ -2571,21 +2611,6 @@ void DesktopCanvas::syncDesktopIcons(bool force)
             knownLoosePaths.insert(it.key());
     }
 
-    if (force) {
-        for (int i = m_looseIcons.size() - 1; i >= 0; --i) {
-            DesktopIcon *icon = m_looseIcons[i];
-            if (!icon || icon->item().isSystemIcon)
-                continue;
-            m_selectedIcons.remove(icon);
-            if (m_selectionAnchor == icon)
-                m_selectionAnchor = nullptr;
-            icon->hide();
-            icon->deleteLater();
-            m_looseIcons.removeAt(i);
-        }
-        changed = true;
-    }
-
     // 清理已经不存在的散落图标坐标。旧版本只删除控件，没有清理那些
     // “启动前就已被移走”的路径，配置文件会长期残留幽灵坐标。
     for (auto it = m_looseIconPositions.begin();
@@ -2656,9 +2681,6 @@ void DesktopCanvas::syncDesktopIcons(bool force)
             const DesktopItem refreshed = DesktopItem::fromPath(path);
             if (refreshed.isValid())
                 icon->setItem(refreshed);
-            icon->show();
-            icon->raise();
-            icon->update();
         }
     }
 
@@ -2703,9 +2725,8 @@ void DesktopCanvas::syncDesktopIcons(bool force)
         auto *icon = new DesktopIcon(item, this);
         connectLooseIcon(icon);
         m_looseIcons.append(icon);
-        icon->show();
-        icon->raise();
-        icon->update();
+        // 保持隐藏，layoutLooseIcons() 写入最终坐标后再统一显示。
+        icon->hide();
         writeSyncDebug(QStringLiteral("SYNC_ADD"),
             QStringLiteral("path=%1 displayName=%2 mime=%3")
                 .arg(item.filePath, item.displayName, item.mimeType));
@@ -2713,18 +2734,13 @@ void DesktopCanvas::syncDesktopIcons(bool force)
         addedNew = true;
     }
 
-    // 新增了图标后，把 show/raise 事件排空，确保控件几何尺寸就绪后再布局。
-    // 否则 layoutLooseIcons 可能在控件未完全初始化的状态下 move()，导致
-    // KWin compositor 错过子控件区域，出现"数据已同步但不显示"的问题。
-    if (addedNew)
-        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-
     // 这里不能只在 changed=true 时布局。真实桌面上可能出现"路径和坐标
     // 已在 layout 中，但对应子控件被隐藏/未 move/show"的半同步状态；
     // 这种情况下文件集合没有变化，手动刷新也必须重新压一次散落图标布局。
     if (changed || force)
         assignLooseIconsToFirstCells();
-    layoutLooseIcons();
+    if (changed || force)
+        layoutLooseIcons();
     if (changed || force || addedNew)
         revealLooseIcons();
     syncCutVisualState();
@@ -2758,15 +2774,20 @@ void DesktopCanvas::startMultiDrag()
     for (const QString &path : paths)
         urls << QUrl::fromLocalFile(path);
     mime->setUrls(urls);
+    mime->setData(kInternalFileDragMime, QByteArrayLiteral("1"));
     drag->setMimeData(mime);
 
     // 第一个图标作为拖动缩略图
     if (!m_selectedIcons.isEmpty()) {
         DesktopIcon *first = *m_selectedIcons.constBegin();
-        if (first && !first->item().icon.isNull())
+        if (first && !first->item().icon.isNull()) {
             drag->setPixmap(first->item().icon.pixmap(48, 48));
+            drag->setHotSpot(QPoint(8, 8));
+        }
     }
-    drag->exec(Qt::MoveAction | Qt::CopyAction);
+    const Qt::DropAction action =
+        drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
+    handleDragOperationFinished(paths, action);
 }
 
 // ── 回收站状态刷新 ───────────────────────────────────
@@ -2809,19 +2830,8 @@ void DesktopCanvas::syncCutVisualState()
     }
 
     watchedCutPaths.sort(Qt::CaseInsensitive);
-    if (watchedCutPaths != m_cutClipboardPaths) {
+    if (watchedCutPaths != m_cutClipboardPaths)
         m_cutClipboardPaths = watchedCutPaths;
-        m_cutClipboardStartedMs = watchedCutPaths.isEmpty()
-            ? 0
-            : QDateTime::currentMSecsSinceEpoch();
-    }
-
-    const bool staleCutVisual =
-        !cutPaths.isEmpty() &&
-        m_cutClipboardStartedMs > 0 &&
-        QDateTime::currentMSecsSinceEpoch() - m_cutClipboardStartedMs > 3500;
-    if (staleCutVisual)
-        cutPaths.clear();
 
     updateCutPathWatches(watchedCutPaths);
 
@@ -2837,17 +2847,10 @@ void DesktopCanvas::syncCutVisualState()
     }
 
     if (m_cutRefreshTimer) {
-        if (files.move && !files.paths.isEmpty() && !cutPaths.isEmpty()) {
-            m_cutRefreshGraceTicks = 3;
-            if (!m_cutRefreshTimer->isActive())
-                m_cutRefreshTimer->start();
-        } else if (files.move && !files.paths.isEmpty() &&
-                   m_cutRefreshGraceTicks > 0) {
-            --m_cutRefreshGraceTicks;
+        if (files.move && !files.paths.isEmpty()) {
             if (!m_cutRefreshTimer->isActive())
                 m_cutRefreshTimer->start();
         } else {
-            m_cutRefreshGraceTicks = 0;
             m_cutRefreshTimer->stop();
         }
     }
@@ -3087,11 +3090,15 @@ void DesktopCanvas::revealLooseIcons()
     for (DesktopIcon *icon : m_looseIcons) {
         if (!icon)
             continue;
-        icon->show();
-        icon->raise();
+        // 已显示的图标在刷新时不重复 show/raise，避免子窗口
+        // 重排层的瞬间暴露未绘制的 backing-store 矩形。
+        if (!icon->isVisible()) {
+            icon->show();
+            icon->raise();
+        }
         icon->update();
     }
-    repaint();
+    update();
 }
 
 void DesktopCanvas::layoutLooseIcons()
@@ -3180,15 +3187,16 @@ void DesktopCanvas::layoutLooseIcons()
         snapped.setY(qBound(area.top(), snapped.y(),
                             area.bottom() - icon->height()));
         m_looseIconPositions[path] = snapped;
-        icon->move(snapped);
-        icon->show();
-        icon->raise();
+        if (icon->pos() != snapped)
+            icon->move(snapped);
+        if (!icon->isVisible()) {
+            icon->show();
+            icon->raise();
+        }
         icon->update();
     }
-    // 用 repaint() 而不是 update()：桌面窗口是原生 X11 窗口，KWin
-    // compositor 可能在异步 update 到达之前缓存父控件的中间帧（仅壁纸、
-    // 不含子控件），导致新增图标只在重启后可见。
-    repaint();
+    // 所有子图标已到达最终位置后再异步提交一个合成帧。
+    update();
 }
 
 void DesktopCanvas::removeLooseIcon(const QString &filePath)
@@ -3341,6 +3349,53 @@ void DesktopCanvas::removePathsFromAllViews(const QStringList &paths)
         saveLayout();
         syncCutVisualState();
     }
+}
+
+void DesktopCanvas::handleFilesTransferred(
+    const QStringList &sourcePaths,
+    const QStringList &targetPaths,
+    bool move)
+{
+    const int count = qMin(sourcePaths.size(), targetPaths.size());
+    if (count <= 0)
+        return;
+
+    UndoOperation op;
+    op.type = UndoOperation::Type::Paste;
+    op.move = move;
+    for (int i = 0; i < count; ++i) {
+        const QString source = normalizedStoredPath(sourcePaths.at(i));
+        const QString target = normalizedStoredPath(targetPaths.at(i));
+        if (source.isEmpty() || target.isEmpty())
+            continue;
+        op.sourcePaths << source;
+        op.targetPaths << target;
+        FenceWidget *owner = fenceContainingPath(source);
+        op.fenceIds << (owner ? owner->fenceId() : QString());
+    }
+
+    if (move)
+        removePathsFromAllViews(op.sourcePaths);
+    pushUndo(op);
+
+    scheduleRefresh();
+    scheduleRefresh(500);
+    scheduleRefresh(1600);
+}
+
+void DesktopCanvas::handleDragOperationFinished(
+    const QStringList &paths,
+    Qt::DropAction action)
+{
+    if (action != Qt::MoveAction || paths.isEmpty())
+        return;
+
+    // 本进程接收端会立即更新归属；外部文件管理器可能异步执行移动。
+    // 这里触发集中式目录对账，不再由源图标猜测某个固定毫秒点。
+    scheduleRefresh();
+    scheduleRefresh(600);
+    scheduleRefresh(1800);
+    scheduleRefresh(5000);
 }
 
 bool DesktopCanvas::pruneMissingFileIcons()
@@ -3538,8 +3593,7 @@ void DesktopCanvas::recordPasteUndo(const FileClipboard::PasteResult &result,
     op.targetPaths = result.transferredPaths;
     op.sourcePaths = result.placedSourcePaths;
 
-    for (int i = 0; i < op.targetPaths.size(); ++i)
-        op.fenceIds << (fence ? fence->fenceId() : QString());
+    Q_UNUSED(fence);
 
     pushUndo(op);
 }
@@ -3693,6 +3747,13 @@ void DesktopCanvas::undoLastOperation()
                     continue;
                 }
                 restoredPaths << source;
+                if (auto *fence = fenceById(op.fenceIds.value(i))) {
+                    DesktopItem item = DesktopItem::fromPath(source);
+                    if (item.isValid()) {
+                        fence->addItem(item);
+                        removeLooseIcon(source);
+                    }
+                }
             }
         } else {
             for (const QString &path : op.targetPaths) {
@@ -3790,10 +3851,13 @@ FenceWidget *DesktopCanvas::createFence(const QString &title, const QRect &geo)
         op.sourcePaths = sourcePaths;
         op.targetPaths = placedPaths;
         op.move = move;
-        for (int i = 0; i < placedPaths.size(); ++i)
-            op.fenceIds << (fence ? fence->fenceId() : QString());
+        Q_UNUSED(fence);
         pushUndo(op);
     });
+    connect(fence, &FenceWidget::filesTransferred,
+            this, &DesktopCanvas::handleFilesTransferred);
+    connect(fence, &FenceWidget::dragOperationFinished,
+            this, &DesktopCanvas::handleDragOperationFinished);
     connect(fence, &FenceWidget::filesTrashed,
             this, [this, fence](const QStringList &paths) {
         recordTrashUndo(paths, fence);
@@ -4061,20 +4125,91 @@ void DesktopCanvas::applyIconScale(qreal scale)
 
 void DesktopCanvas::dragEnterEvent(QDragEnterEvent *e)
 {
-    if (e->mimeData()->hasUrls() ||
-        e->mimeData()->hasFormat(kSystemIconMime))
-        e->acceptProposedAction();
+    if (e->mimeData()->hasFormat(kSystemIconMime)) {
+        e->setDropAction(Qt::MoveAction);
+        e->accept();
+        return;
+    }
+    if (!e->mimeData()->hasUrls()) {
+        e->ignore();
+        return;
+    }
+
+    const bool internal = e->mimeData()->hasFormat(kInternalFileDragMime);
+    const Qt::DropAction action = requestedDropAction(
+        e, internal ? Qt::MoveAction : Qt::CopyAction);
+    if (action == Qt::IgnoreAction) {
+        e->ignore();
+        return;
+    }
+    const QSize previewSize(qRound(80 * m_desktopIconScale),
+                            qRound(104 * m_desktopIconScale));
+    const QRect area = desktopIconArea();
+    QPoint topLeft = e->pos() - QPoint(10, 10);
+    topLeft.setX(qBound(area.left(), topLeft.x(),
+                        qMax(area.left(), area.right() - previewSize.width())));
+    topLeft.setY(qBound(area.top(), topLeft.y(),
+                        qMax(area.top(), area.bottom() - previewSize.height())));
+    m_dropPreviewRect = QRect(topLeft, previewSize);
+    m_dropPreviewCopy = action == Qt::CopyAction;
+    update();
+    e->setDropAction(action);
+    e->accept();
 }
 
 void DesktopCanvas::dragMoveEvent(QDragMoveEvent *e)
 {
-    if (e->mimeData()->hasUrls() ||
-        e->mimeData()->hasFormat(kSystemIconMime))
-        e->acceptProposedAction();
+    if (e->mimeData()->hasFormat(kSystemIconMime)) {
+        e->setDropAction(Qt::MoveAction);
+        e->accept();
+        return;
+    }
+    if (!e->mimeData()->hasUrls()) {
+        e->ignore();
+        return;
+    }
+
+    const bool internal = e->mimeData()->hasFormat(kInternalFileDragMime);
+    const Qt::DropAction action = requestedDropAction(
+        e, internal ? Qt::MoveAction : Qt::CopyAction);
+    if (action == Qt::IgnoreAction) {
+        e->ignore();
+        return;
+    }
+    const QSize previewSize(qRound(80 * m_desktopIconScale),
+                            qRound(104 * m_desktopIconScale));
+    const QRect area = desktopIconArea();
+    QPoint topLeft = e->pos() - QPoint(10, 10);
+    topLeft.setX(qBound(area.left(), topLeft.x(),
+                        qMax(area.left(), area.right() - previewSize.width())));
+    topLeft.setY(qBound(area.top(), topLeft.y(),
+                        qMax(area.top(), area.bottom() - previewSize.height())));
+    const QRect preview(topLeft, previewSize);
+    const bool copy = action == Qt::CopyAction;
+    if (preview != m_dropPreviewRect || copy != m_dropPreviewCopy) {
+        m_dropPreviewRect = preview;
+        m_dropPreviewCopy = copy;
+        update();
+    }
+    e->setDropAction(action);
+    e->accept();
+}
+
+void DesktopCanvas::dragLeaveEvent(QDragLeaveEvent *e)
+{
+    m_dropPreviewRect = QRect();
+    m_dropPreviewCopy = false;
+    update();
+    e->accept();
 }
 
 void DesktopCanvas::dropEvent(QDropEvent *e)
 {
+    const QRect dropPreview = m_dropPreviewRect;
+    m_dropPreviewRect = QRect();
+    m_dropPreviewCopy = false;
+    update();
+
     if (e->mimeData()->hasFormat(kSystemIconMime)) {
         const QString path =
             QString::fromUtf8(e->mimeData()->data(kSystemIconMime)).trimmed();
@@ -4090,7 +4225,8 @@ void DesktopCanvas::dropEvent(QDropEvent *e)
             icon->show();
             layoutLooseIcons();
             saveLayout();
-            e->acceptProposedAction();
+            e->setDropAction(Qt::MoveAction);
+            e->accept();
             return;
         }
 
@@ -4115,7 +4251,8 @@ void DesktopCanvas::dropEvent(QDropEvent *e)
         icon->show();
         layoutLooseIcons();
         saveLayout();
-        e->acceptProposedAction();
+        e->setDropAction(Qt::MoveAction);
+        e->accept();
         return;
     }
 
@@ -4124,28 +4261,44 @@ void DesktopCanvas::dropEvent(QDropEvent *e)
         return;
     }
 
-    QPoint pos = e->pos();
+    const bool internal = e->mimeData()->hasFormat(kInternalFileDragMime);
+    const Qt::DropAction action = requestedDropAction(
+        e, internal ? Qt::MoveAction : Qt::CopyAction);
+    if (action == Qt::IgnoreAction) {
+        e->ignore();
+        return;
+    }
+
+    QPoint pos = dropPreview.isValid()
+        ? dropPreview.topLeft() : e->pos() - QPoint(10, 10);
     disableAutoArrangeForManualPlacement();
+    QStringList transferredSources;
+    QStringList transferredTargets;
+    QStringList failedPaths;
+    bool placedAny = false;
     for (const QUrl &url : e->mimeData()->urls()) {
         QString path = url.toLocalFile();
         if (path.isEmpty()) continue;
 
         const QFileInfo src(path);
-        if (!src.exists()) continue;
+        if (!src.exists()) {
+            failedPaths << path;
+            continue;
+        }
 
-        if (!isInDesktopDirectory(path)) {
+        const bool needsFileTransfer =
+            action == Qt::CopyAction || !isInDesktopDirectory(path);
+        if (needsFileTransfer) {
             const QString target =
                 FileClipboard::uniqueTargetPath(m_desktopPath, src.fileName());
-            const bool move =
-                e->proposedAction() == Qt::MoveAction ||
-                e->dropAction() == Qt::MoveAction;
-
-            if (!transferDroppedPathToDesktop(path, target, move)) {
-                QMessageBox::warning(this, "拖放失败",
-                    QString("无法将 \"%1\" 放到桌面。").arg(src.fileName()));
+            if (!transferDroppedPathToDesktop(
+                    path, target, action == Qt::MoveAction)) {
+                failedPaths << src.absoluteFilePath();
                 continue;
             }
-            path = target;
+            transferredSources << src.absoluteFilePath();
+            path = QFileInfo(target).absoluteFilePath();
+            transferredTargets << path;
         }
 
         for (auto *fence : m_fences)
@@ -4166,17 +4319,36 @@ void DesktopCanvas::dropEvent(QDropEvent *e)
             existing = new DesktopIcon(item, this);
             connectLooseIcon(existing);
             m_looseIcons.append(existing);
-            existing->show();
+            existing->hide();
         }
 
         m_looseIconPositions[path] = pos;
         existing->move(pos);
         pos += QPoint(18, 18);
+        placedAny = true;
     }
 
-    layoutLooseIcons();
-    saveLayout();
-    e->acceptProposedAction();
+    if (!transferredTargets.isEmpty()) {
+        FileClipboard::PasteResult result;
+        result.move = action == Qt::MoveAction;
+        result.placedSourcePaths = transferredSources;
+        result.transferredPaths = transferredTargets;
+        result.placedPaths = transferredTargets;
+        recordPasteUndo(result);
+    }
+    if (!failedPaths.isEmpty()) {
+        QMessageBox::warning(this, "拖放失败",
+            QString("有 %1 个项目无法放到桌面。").arg(failedPaths.size()));
+    }
+
+    if (placedAny) {
+        layoutLooseIcons();
+        saveLayout();
+        e->setDropAction(action);
+        e->accept();
+    } else {
+        e->ignore();
+    }
 }
 
 void DesktopCanvas::keyPressEvent(QKeyEvent *e)
@@ -4259,6 +4431,25 @@ void DesktopCanvas::paintEvent(QPaintEvent *)
         g.setColorAt(0, QColor("#1a2a3a"));
         g.setColorAt(1, QColor("#2c5f8a"));
         p.fillRect(rect(), g);
+    }
+
+    if (m_dropPreviewRect.isValid()) {
+        const QColor accent = m_dropPreviewCopy
+            ? QColor(52, 211, 153, 220)
+            : QColor(96, 165, 250, 220);
+        p.setPen(QPen(accent, 2, Qt::DashLine));
+        p.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 32));
+        p.drawRoundedRect(m_dropPreviewRect.adjusted(2, 2, -2, -2), 9, 9);
+        if (m_dropPreviewCopy) {
+            QFont previewFont = p.font();
+            previewFont.setBold(true);
+            previewFont.setPixelSize(18);
+            p.setFont(previewFont);
+            p.setPen(accent);
+            p.drawText(m_dropPreviewRect.adjusted(0, 3, -6, 0),
+                       Qt::AlignTop | Qt::AlignRight,
+                       QStringLiteral("+"));
+        }
     }
 
     // 编辑模式：顶部提示条
