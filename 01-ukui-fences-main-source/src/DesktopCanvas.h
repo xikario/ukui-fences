@@ -18,6 +18,7 @@
 #include "StackBlur.h"
 
 class FenceWidget;
+class DesktopLensingOverlay;
 class DesktopIcon;
 class SystemMonitor;
 class SmartSpaceWidget;
@@ -38,6 +39,7 @@ class DesktopCanvas : public QWidget
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.ukui.fences")
     friend class FenceWidget;
+    friend class DesktopLensingOverlay;
 public:
     explicit DesktopCanvas(QWidget *parent = nullptr);
     ~DesktopCanvas();

@@ -13,6 +13,9 @@ set(CMAKE_SKIP_BUILD_RPATH ON)
 option(UKUI_FENCES_BUILD_GLASS_EXPERIMENTS
        "Build liquid-glass capability and visual probes" ON)
 
+option(UKUI_FENCES_ENABLE_LENSING_DEMO
+       "Enable Fence shader lensing demo overlay" OFF)
+
 set(UKUI_FENCES_QT_SDK_ROOT
     "${CMAKE_SOURCE_DIR}/.local-deps"
     CACHE PATH "Qt5 SDK root used when system development files are unavailable")
@@ -37,6 +40,13 @@ if(NOT UKUI_FENCES_X11_INCLUDE_DIR OR NOT UKUI_FENCES_X11_LIBRARY)
     message(FATAL_ERROR "X11 development headers or runtime library were not found")
 endif()
 
+find_path(UKUI_FENCES_GL_INCLUDE_DIR GL/gl.h
+    HINTS "${UKUI_FENCES_QT_SDK_ROOT}/root/usr/include")
+if(UKUI_FENCES_ENABLE_LENSING_DEMO AND NOT UKUI_FENCES_GL_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "GL/gl.h is required when UKUI_FENCES_ENABLE_LENSING_DEMO=ON")
+endif()
+
 add_executable(ukui-fences
     src/main.cpp
     src/DesktopCanvas.cpp
@@ -52,6 +62,12 @@ add_executable(ukui-fences
     src/MenuStyle.h
     resources.qrc
 )
+
+if(UKUI_FENCES_ENABLE_LENSING_DEMO)
+    target_sources(ukui-fences PRIVATE src/GlassLensingDemo.cpp)
+    target_include_directories(ukui-fences PRIVATE
+        ${UKUI_FENCES_GL_INCLUDE_DIR})
+endif()
 
 target_compile_definitions(ukui-fences PRIVATE
     UKUI_FENCES_SMART_INDEXER_PATH="${CMAKE_SOURCE_DIR}/scripts/smart_space_indexer.py"
@@ -73,7 +89,6 @@ target_link_libraries(ukui-fences PRIVATE
 )
 
 if(UKUI_FENCES_BUILD_GLASS_EXPERIMENTS)
-    find_path(UKUI_FENCES_GL_INCLUDE_DIR GL/gl.h)
     if(UKUI_FENCES_GL_INCLUDE_DIR)
         add_executable(qopenglwidget_shader_probe
             experiments/qopenglwidget_shader_probe.cpp)
@@ -212,4 +227,5 @@ install(FILES packaging/ukui-fences-autostart.desktop
         DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/xdg/autostart)
 install(FILES README.md docs/SMART_SPACE.md docs/SMART_SPACE_TEST_REPORT.md
               docs/SMART_SPACE_KNOWLEDGE.md
+              docs/LIQUID_GLASS_LENSING_DEMO.md
         DESTINATION ${CMAKE_INSTALL_DOCDIR})
