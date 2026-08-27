@@ -51,11 +51,11 @@ QString venturaContextMenuStyleSheet()
             color: rgba(241,245,249,245);
             border: 1px solid rgba(255,255,255,58);
             border-radius: 12px;
-            padding: 5px;
+            padding: 4px;
         }
         QMenu::item {
             background-color: transparent;
-            padding: 5px 24px 5px 12px;
+            padding: 3px 24px 3px 12px;
             border: 1px solid transparent;
             border-radius: 6px;
             min-height: 17px;
@@ -71,7 +71,7 @@ QString venturaContextMenuStyleSheet()
         QMenu::separator {
             height: 1px;
             background-color: rgba(255,255,255,28);
-            margin: 4px 7px;
+            margin: 3px 7px;
         }
         QMenu::indicator {
             width: 14px;

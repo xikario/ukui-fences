@@ -7,6 +7,7 @@
 ## 设计目标
 
 - 单个全桌面 `QOpenGLWidget`，所有 Fence 共用一个 OpenGL context 和一张壁纸纹理，避免每个 Fence 各自复制 20 MiB 级纹理。
+- GL 层是独立的透明输出窗口，使用 `WindowTransparentForInput` 让 X11 从窗口系统层面穿透鼠标、触摸和滚轮事件；不再使用会破坏 QWidget 层级的 `WA_AlwaysStackOnTop`。
 - V2 使用 0–8 px 强折射 rim 与 8–28 px 反向 shoulder；中央可在 Shader 内混回 11% 原壁纸清晰度。
 - Fence 移动速度会动态提高折射位移，停止后平滑回落；完全稳定后动画 Timer 停止。
 - 鼠标位置参与局部 specular highlight，高光不是固定的顶部渐变。
@@ -119,7 +120,7 @@ export UKUI_FENCES_GLASS_ACTIVE_FRAME_MS=50
 ## 当前已知限制
 
 - Demo 使用圆角矩形 SDF，暂未复刻 Fence 的“壁纸磁吸异形轮廓”；磁吸形状仍由原 QWidget 路径负责。
-- Overlay 是全桌面透明 QOpenGLWidget，适合验证视觉和 FTG340 性能，不代表最终生产架构。
+- Overlay 是系统级输入穿透的全桌面透明 QOpenGLWidget，适合验证视觉和 FTG340 性能，不代表最终生产架构。
 - FTG340 的异步 Timer Query 已可用；GPU 耗时仍存在驱动/调度波动，不能与 CPU submit 相互替代。
 - 标题栏顶部折射刻意减弱，避免影响现有标题文字可读性。
 

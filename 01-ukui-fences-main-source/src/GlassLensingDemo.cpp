@@ -177,13 +177,21 @@ class DesktopLensingOverlay final : public QOpenGLWidget,
 {
 public:
     explicit DesktopLensingOverlay(DesktopCanvas *canvas)
-        : QOpenGLWidget(canvas)
+        : QOpenGLWidget(canvas,
+              Qt::Tool |
+              Qt::FramelessWindowHint |
+              Qt::X11BypassWindowManagerHint |
+              Qt::WindowTransparentForInput |
+              Qt::WindowDoesNotAcceptFocus)
         , m_canvas(canvas)
         , m_config(demoConfig())
     {
         setObjectName(QStringLiteral("ukui-fences-lensing-overlay"));
         setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        setAttribute(Qt::WA_AlwaysStackOnTop, true);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_NoSystemBackground, false);
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setAttribute(Qt::WA_X11DoNotAcceptFocus, true);
         setAutoFillBackground(false);
         setFocusPolicy(Qt::NoFocus);
 
@@ -196,8 +204,11 @@ public:
         format.setStencilBufferSize(0);
         setFormat(format);
 
-        resize(canvas->size());
+        setGeometry(QRect(canvas->mapToGlobal(QPoint(0, 0)), canvas->size()));
         show();
+        // This is an output-only native window. WindowTransparentForInput is
+        // enforced by the X11 platform plugin, so the full-canvas surface can
+        // never become the target of a click, touch or wheel event.
         raise();
         m_motionClock.start();
         m_frameThrottleClock.start();
@@ -255,8 +266,10 @@ public:
     {
         if (!m_canvas)
             return;
-        if (size() != m_canvas->size())
-            resize(m_canvas->size());
+        const QRect canvasGeometry(
+            m_canvas->mapToGlobal(QPoint(0, 0)), m_canvas->size());
+        if (geometry() != canvasGeometry)
+            setGeometry(canvasGeometry);
         raise();
         requestInteractiveFrame();
     }
@@ -342,6 +355,10 @@ protected:
             {
                 vec2 local = vec2(v_uv.x * u_widgetSize.x,
                                   (1.0 - v_uv.y) * u_widgetSize.y);
+                vec2 screenPx = u_widgetOrigin + local;
+                vec2 baseUv = screenPx / max(u_wallpaperSize, vec2(1.0));
+                baseUv.y = 1.0 - baseUv.y;
+
                 vec2 center = u_widgetSize * 0.5;
                 vec2 halfSize = max(vec2(1.0), center - vec2(0.75));
                 float sdf = sdRoundBox(local - center, halfSize, u_cornerRadius);
@@ -357,10 +374,6 @@ protected:
                                                    u_edgeBand,
                                                    insideDistance));
                 float edgeVisual = max(rim, shoulder * 0.58);
-
-                vec2 screenPx = u_widgetOrigin + local;
-                vec2 baseUv = screenPx / max(u_wallpaperSize, vec2(1.0));
-                baseUv.y = 1.0 - baseUv.y;
 
                 // Restore central structure with one GPU sample, no CPU blur.
                 if (edgeVisual <= 0.002) {
@@ -586,7 +599,6 @@ protected:
             }
             ++drawnFences;
         }
-
         m_program.disableAttributeArray(m_positionAttribute);
         m_texture->release();
         m_program.release();
