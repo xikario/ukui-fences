@@ -1412,9 +1412,49 @@ void FenceWidget::paintEvent(QPaintEvent *)
 
     const QRectF r(rect());
 
-    // 整体背景
+    // 整体背景形状
     const QPainterPath bgPath = fenceShapePath();
-    p.fillPath(bgPath, m_color);
+
+    // ═══ 液态玻璃效果 (Tier 0 + Tier 1) ═══════════════════
+
+    // ① 模糊壁纸背景层（Tier 0 — 零运行时开销）
+    auto *canvas = qobject_cast<DesktopCanvas *>(parentWidget());
+    if (!canvas || !canvas->paintBlurredWallpaper(p, this, bgPath)) {
+        // 回退：使用原有纯色背景
+        p.fillPath(bgPath, m_color);
+    }
+
+    // ② 半透明 Tint 色调层（玻璃底色）
+    {
+        QColor tint = m_color;
+        tint.setAlpha(qMin(255, qMax(30, m_color.alpha())));
+        p.fillPath(bgPath, tint);
+    }
+
+    // ③ 顶部边缘高光渐变（Fresnel 近似 — Tier 1）
+    {
+        QLinearGradient highlight(0, 0, 0, qMin(50.0, r.height() * 0.3));
+        highlight.setColorAt(0.0, QColor(255, 255, 255, 55));
+        highlight.setColorAt(1.0, QColor(255, 255, 255, 0));
+        p.save();
+        p.setClipPath(bgPath);
+        p.fillRect(QRectF(0, 0, r.width(), qMin(50.0, r.height() * 0.3)),
+                   highlight);
+        p.restore();
+    }
+
+    // ④ 底部内阴影（深度感 — Tier 1）
+    {
+        const double shadowH = qMin(35.0, r.height() * 0.2);
+        QLinearGradient innerShadow(0, r.height() - shadowH, 0, r.height());
+        innerShadow.setColorAt(0.0, QColor(0, 0, 0, 0));
+        innerShadow.setColorAt(1.0, QColor(0, 0, 0, 28));
+        p.save();
+        p.setClipPath(bgPath);
+        p.fillRect(QRectF(0, r.height() - shadowH, r.width(), shadowH),
+                   innerShadow);
+        p.restore();
+    }
 
     // 标题栏（略深，与主体平滑衔接）
     QColor titleBg = m_color;
@@ -1426,12 +1466,12 @@ void FenceWidget::paintEvent(QPaintEvent *)
     titlePath = titlePath.united(cut).intersected(bgPath);
     p.fillPath(titlePath, titleBg);
 
-    // 边框
+    // ⑤ 边框（Tier 1 — 半透明高光边框 + 编辑模式金色边框）
     if (m_editMode)
         p.setPen(QPen(QColor(255, 200, 0, 230), 2));
     else {
         QColor border = m_hasTitleFont ? m_titleFontColor : QColor(Qt::white);
-        border.setAlpha(55);
+        border.setAlpha(45);
         p.setPen(QPen(border, 1));
     }
     p.drawPath(bgPath);

@@ -1307,6 +1307,7 @@ void DesktopCanvas::loadWallpaper()
 void DesktopCanvas::clearWallpaperCache()
 {
     m_wallpaperCache = QPixmap();
+    m_blurredWallpaperCache = QPixmap();
     m_wallpaperCacheLogicalSize = QSize();
     m_wallpaperCacheDpr = 0.0;
 }
@@ -1388,6 +1389,50 @@ void DesktopCanvas::rebuildWallpaperCache()
     m_wallpaperCache.setDevicePixelRatio(dpr);
     m_wallpaperCacheLogicalSize = size();
     m_wallpaperCacheDpr = dpr;
+
+    // ── 液态玻璃：生成模糊壁纸缓存（一次性预计算）──────────
+    if (m_glassBlurRadius > 0) {
+        QImage blurred = result;   // result 还在作用域内，直接复用
+        GlassEffect::stackBlur(blurred, m_glassBlurRadius);
+        m_blurredWallpaperCache = QPixmap::fromImage(blurred);
+        m_blurredWallpaperCache.setDevicePixelRatio(dpr);
+    } else {
+        m_blurredWallpaperCache = QPixmap();
+    }
+}
+
+bool DesktopCanvas::paintBlurredWallpaper(
+    QPainter &painter, const QWidget *target,
+    const QPainterPath &clipPath) const
+{
+    if (!target || m_blurredWallpaperCache.isNull() || clipPath.isEmpty())
+        return false;
+
+    // Global coordinates support ordinary children and SmartSpaceWidget after
+    // it is promoted to an owned top-level tool window.
+    const QPoint canvasOrigin =
+        mapFromGlobal(target->mapToGlobal(QPoint(0, 0)));
+    const qreal dpr = m_blurredWallpaperCache.devicePixelRatio();
+
+    painter.save();
+    painter.setClipPath(clipPath);
+    painter.drawPixmap(
+        QPointF(0, 0), m_blurredWallpaperCache,
+        QRectF(canvasOrigin.x() * dpr, canvasOrigin.y() * dpr,
+               target->width() * dpr, target->height() * dpr));
+    painter.restore();
+    return true;
+}
+
+void DesktopCanvas::setGlassBlurRadius(int r)
+{
+    r = qBound(0, r, 254);
+    if (m_glassBlurRadius == r) return;
+    m_glassBlurRadius = r;
+    // 强制重建模糊缓存
+    m_wallpaperCacheLogicalSize = QSize();
+    rebuildWallpaperCache();
+    update();
 }
 
 bool DesktopCanvas::loadExternalTheme()

@@ -1,4 +1,4 @@
-# ukui-fences v0.4.0 — 桌面分区管理工具
+# ukui-fences v0.4.1 — 桌面分区管理工具
 
 ## 产品概述
 
@@ -163,7 +163,7 @@
 ## 项目结构
 
 ```
-ukui-fences-v0.4.0/
+ukui-fences-v0.4.1/
 ├── CMakeLists.txt              # CMake 构建配置
 ├── assets/
 │   └── fence-icons/            # 10 个预制 SVG 围栏图标

@@ -15,6 +15,7 @@
 #include <QImage>
 #include "DesktopItem.h"
 #include "FileClipboard.h"
+#include "StackBlur.h"
 
 class FenceWidget;
 class DesktopIcon;
@@ -27,6 +28,8 @@ class QDragLeaveEvent;
 class QDropEvent;
 class QKeyEvent;
 class QMoveEvent;
+class QPainter;
+class QPainterPath;
 class QResizeEvent;
 class QWheelEvent;
 
@@ -61,6 +64,8 @@ public:
     void setFontBold(bool bold);
     void setFontItalic(bool italic);
     QColor wallpaperColorAt(const QRect &area) const;
+    bool paintBlurredWallpaper(QPainter &painter, const QWidget *target,
+                               const QPainterPath &clipPath) const;
 
 public slots:
     Q_SCRIPTABLE void showAndActivate();
@@ -154,6 +159,8 @@ private:
     void loadWallpaper();
     void clearWallpaperCache();
     void rebuildWallpaperCache();
+    int  glassBlurRadius() const { return m_glassBlurRadius; }
+    void setGlassBlurRadius(int r);
     bool loadExternalTheme();
     void applyExternalThemeToFences();
     bool applyWallpaperThemeToFences();
@@ -254,6 +261,8 @@ private:
     WallpaperMode       m_wallpaperMode = WallpaperMode::System;
     QString             m_wallpaperPath;
     bool                m_wallpaperUsingCustom = false;
+    QPixmap             m_blurredWallpaperCache;
+    int                 m_glassBlurRadius = 28;
     QList<FenceWidget*> m_fences;
     QList<DesktopIcon*> m_looseIcons;
     QSet<DesktopIcon*>  m_selectedIcons;

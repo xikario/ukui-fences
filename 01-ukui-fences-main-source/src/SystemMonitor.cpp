@@ -1137,14 +1137,44 @@ void SystemMonitor::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.scale(m_scale, m_scale);
     const Palette colors = paletteForSkin();
+
+    // Paint the cached desktop slice before applying the monitor's responsive
+    // coordinate scale.  Only the two backdrop-aware skins opt into Tier 0.
+    QPainterPath glassPath;
+    glassPath.addRoundedRect(
+        QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+        14.0 * m_scale, 14.0 * m_scale);
+    const bool wantsGlass =
+        m_skin == Skin::Glass || m_skin == Skin::Wallpaper;
+    auto *canvas = qobject_cast<DesktopCanvas *>(parentWidget());
+    const bool hasBlurredBackdrop =
+        wantsGlass && canvas &&
+        canvas->paintBlurredWallpaper(painter, this, glassPath);
+    if (hasBlurredBackdrop) {
+        QColor tint = colors.panel;
+        tint.setAlpha(qMin(150, tint.alpha()));
+        painter.fillPath(glassPath, tint);
+
+        QLinearGradient highlight(0, 0, 0, qMin(64, height() / 3));
+        highlight.setColorAt(0.0, QColor(255, 255, 255, 54));
+        highlight.setColorAt(1.0, QColor(255, 255, 255, 0));
+        painter.save();
+        painter.setClipPath(glassPath);
+        painter.fillRect(rect(), highlight);
+        painter.restore();
+    }
+
+    painter.scale(m_scale, m_scale);
 
     if (m_premiumAesthetics) {
         // Draw main panel with double border & soft glow
         painter.setPen(Qt::NoPen);
-        painter.setBrush(colors.panel);
-        painter.drawRoundedRect(QRect(0, 0, logicalWidth(), logicalHeight()), 14, 14);
+        if (!hasBlurredBackdrop) {
+            painter.setBrush(colors.panel);
+            painter.drawRoundedRect(
+                QRect(0, 0, logicalWidth(), logicalHeight()), 14, 14);
+        }
 
         // Soft outer glow using accent color (CPU color)
         QColor glowColor = colors.cpu;
@@ -1158,7 +1188,9 @@ void SystemMonitor::paintEvent(QPaintEvent *)
         painter.drawRoundedRect(QRect(0, 0, logicalWidth() - 1, logicalHeight() - 1), 14, 14);
     } else {
         painter.setPen(QPen(colors.border, 1));
-        painter.setBrush(colors.panel);
+        painter.setBrush(hasBlurredBackdrop
+                             ? QBrush(Qt::NoBrush)
+                             : QBrush(colors.panel));
         painter.drawRoundedRect(
             QRect(0, 0, logicalWidth() - 1, logicalHeight() - 1), 14, 14);
     }

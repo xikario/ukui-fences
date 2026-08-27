@@ -1,5 +1,6 @@
 #include "SmartSpaceWidget.h"
 
+#include "DesktopCanvas.h"
 #include "DesktopItem.h"
 #include <QAction>
 #include <QApplication>
@@ -1225,9 +1226,19 @@ void SmartSpaceWidget::applyTheme()
         m_mutedColor = QColor(QStringLiteral("#94a3b8"));
         m_accentColor = QColor(QStringLiteral("#3b82f6"));
     }
+    if (!m_fenceEmbedded) {
+        // Keep text controls readable while allowing the cached wallpaper
+        // slice to remain visible through the main panels.
+        m_surfaceColor.setAlpha(lightMode ? 150 : 174);
+        m_cardColor.setAlpha(lightMode ? 205 : 190);
+        m_borderColor.setAlpha(lightMode ? 190 : 165);
+    }
     setFont(QFont());
-    setAttribute(Qt::WA_OpaquePaintEvent, true);
-    setAutoFillBackground(true);
+    // The normal desktop-child/tool-window modes need transparent gaps so the
+    // cached wallpaper slice painted below remains visible.  Fence-embedded
+    // mode keeps its original opaque backing store.
+    setAttribute(Qt::WA_OpaquePaintEvent, m_fenceEmbedded);
+    setAutoFillBackground(m_fenceEmbedded);
     if (m_themeToggleButton) {
         const QSignalBlocker blocker(m_themeToggleButton);
         m_themeToggleButton->setText(
@@ -2245,8 +2256,8 @@ void SmartSpaceWidget::revealFromEdge()
     m_actionRail->show();
     m_contentContainer->show();
     setAttribute(Qt::WA_NoSystemBackground, false);
-    setAttribute(Qt::WA_OpaquePaintEvent, true);
-    setAutoFillBackground(true);
+    setAttribute(Qt::WA_OpaquePaintEvent, m_fenceEmbedded);
+    setAutoFillBackground(m_fenceEmbedded);
     setMinimumSize(620, 360);
     resize(restoredSize);
     move(boundedPosition(restoredPosition));
@@ -5351,13 +5362,30 @@ void SmartSpaceWidget::paintEvent(QPaintEvent *event)
     QPainterPath path;
     const int radius = m_edgeHidden ? 13 : 16;
     path.addRoundedRect(rect().adjusted(1, 1, -1, -1), radius, radius);
-    QLinearGradient glass(rect().topLeft(), rect().bottomRight());
-    QColor highlight = m_surfaceColor.lighter(112);
-    highlight.setAlpha(m_surfaceColor.alpha());
-    glass.setColorAt(0.0, highlight);
-    glass.setColorAt(0.42, m_surfaceColor);
-    glass.setColorAt(1.0, m_surfaceColor.darker(108));
-    painter.fillPath(path, glass);
+    auto *canvas = qobject_cast<DesktopCanvas *>(parentWidget());
+    const bool hasBlurredBackdrop =
+        canvas && canvas->paintBlurredWallpaper(painter, this, path);
+    if (hasBlurredBackdrop) {
+        QColor tint = m_surfaceColor;
+        tint.setAlpha(m_themeMode == 2 ? 138 : 168);
+        painter.fillPath(path, tint);
+
+        QLinearGradient highlight(0, 0, 0, qMin(72, height() / 3));
+        highlight.setColorAt(0.0, QColor(255, 255, 255, 52));
+        highlight.setColorAt(1.0, QColor(255, 255, 255, 0));
+        painter.save();
+        painter.setClipPath(path);
+        painter.fillRect(rect(), highlight);
+        painter.restore();
+    } else {
+        QLinearGradient glass(rect().topLeft(), rect().bottomRight());
+        QColor highlight = m_surfaceColor.lighter(112);
+        highlight.setAlpha(m_surfaceColor.alpha());
+        glass.setColorAt(0.0, highlight);
+        glass.setColorAt(0.42, m_surfaceColor);
+        glass.setColorAt(1.0, m_surfaceColor.darker(108));
+        painter.fillPath(path, glass);
+    }
     QColor outline = m_accentColor;
     outline.setAlpha(m_editMode ? 210 : 100);
     painter.setPen(QPen(outline,

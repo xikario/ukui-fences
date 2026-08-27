@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ukui-fences VERSION 0.4.0 LANGUAGES CXX)
+project(ukui-fences VERSION 0.4.1 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)
@@ -9,6 +9,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_SKIP_BUILD_RPATH ON)
+
+option(UKUI_FENCES_BUILD_GLASS_EXPERIMENTS
+       "Build liquid-glass capability and visual probes" ON)
 
 set(UKUI_FENCES_QT_SDK_ROOT
     "${CMAKE_SOURCE_DIR}/.local-deps"
@@ -21,6 +24,7 @@ if(NOT Qt5_FOUND)
     find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets DBus)
 endif()
 find_package(ZLIB REQUIRED)
+find_package(Threads REQUIRED)
 
 find_path(UKUI_FENCES_X11_INCLUDE_DIR X11/Xlib.h
     HINTS "${UKUI_FENCES_QT_SDK_ROOT}/root/usr/include")
@@ -61,10 +65,38 @@ target_link_libraries(ukui-fences PRIVATE
     Qt5::Widgets
     Qt5::DBus
     ZLIB::ZLIB
+    Threads::Threads
     ${UKUI_FENCES_X11_LIBRARY}
 )
 
+if(UKUI_FENCES_BUILD_GLASS_EXPERIMENTS)
+    find_path(UKUI_FENCES_GL_INCLUDE_DIR GL/gl.h)
+    if(UKUI_FENCES_GL_INCLUDE_DIR)
+        add_executable(qopenglwidget_shader_probe
+            experiments/qopenglwidget_shader_probe.cpp)
+        target_include_directories(qopenglwidget_shader_probe PRIVATE
+            ${UKUI_FENCES_GL_INCLUDE_DIR})
+        target_link_libraries(qopenglwidget_shader_probe PRIVATE
+            Qt5::Core Qt5::Gui Qt5::Widgets)
+    else()
+        message(WARNING
+            "GL/gl.h was not found; qopenglwidget_shader_probe is skipped")
+    endif()
+
+    add_executable(glass_visual_preview
+        experiments/glass_visual_preview.cpp)
+    target_include_directories(glass_visual_preview PRIVATE src/)
+    target_link_libraries(glass_visual_preview PRIVATE
+        Qt5::Core Qt5::Gui Threads::Threads)
+endif()
+
 if(BUILD_TESTING)
+    add_executable(stack_blur_test tests/test_stack_blur.cpp)
+    target_include_directories(stack_blur_test PRIVATE src/)
+    target_link_libraries(stack_blur_test PRIVATE
+        Qt5::Core Qt5::Gui Threads::Threads)
+    add_test(NAME stack_blur COMMAND stack_blur_test)
+
     add_executable(office_document_factory_test
         tests/test_office_document_factory.cpp
         src/OfficeDocumentFactory.cpp)
