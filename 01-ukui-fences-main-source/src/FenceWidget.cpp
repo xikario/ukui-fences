@@ -1431,8 +1431,9 @@ void FenceWidget::paintEvent(QPaintEvent *)
     GlassStyle::paintLayers(p, bgPath, r, glass, false);
 
     // 标题栏（略深，与主体平滑衔接）
-    QColor titleBg = glass.tint.darker(lightSurface ? 104 : 118);
-    titleBg.setAlpha(qMin(220, glass.tint.alpha() + 48));
+    // Keep the title readable without splitting glass into an opaque bar/body.
+    QColor titleBg = glass.tint.darker(lightSurface ? 102 : 108);
+    titleBg.setAlpha(qMin(200, glass.tint.alpha() + 20));
     QPainterPath titlePath;
     titlePath.addRoundedRect(QRectF(0, 0, width(), TITLE_H), 10, 10);
     QPainterPath cut;

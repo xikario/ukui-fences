@@ -7,8 +7,8 @@
 ## 设计目标
 
 - 单个全桌面 `QOpenGLWidget`，所有 Fence 共用一个 OpenGL context 和一张壁纸纹理，避免每个 Fence 各自复制 20 MiB 级纹理。
-- 只渲染 Fence 边缘约 24 px 的 lensing band；中间区域保持透明，继续显示 v0.5.0 现有的 StackBlur + tint + GlassStyle。
-- Fence 移动速度会动态提高折射位移，停止后平滑回落。
+- V2 使用 0–8 px 强折射 rim 与 8–28 px 反向 shoulder；中央可在 Shader 内混回 11% 原壁纸清晰度。
+- Fence 移动速度会动态提高折射位移，停止后平滑回落；完全稳定后动画 Timer 停止。
 - 鼠标位置参与局部 specular highlight，高光不是固定的顶部渐变。
 - 轻量 RGB 采样偏移模拟边缘色散，但幅度很小，避免“彩虹玻璃”。
 - Shader/OpenGL 初始化失败时隐藏 Overlay，原有玻璃路径不受影响。
@@ -21,7 +21,7 @@
 cmake -S . -B build-demo \
   -DCMAKE_BUILD_TYPE=Release \
   -DUKUI_FENCES_ENABLE_LENSING_DEMO=ON
-cmake --build build-demo -j"$(nproc)"
+cmake --build build-demo -j2
 ```
 
 启用该 CMake 选项后，Demo 运行时默认打开。临时关闭 Shader 层：
@@ -65,6 +65,8 @@ JSONL 事件包括：
 
 - `frames`：统计窗口内实际执行的 paintGL 次数。
 - `avg_submit_ms` / `max_submit_ms`：CPU 侧一次 paintGL + draw submit 耗时，不等同 GPU 完整执行时间。
+- `avg_gpu_ms` / `max_gpu_ms`：异步 `GL_TIME_ELAPSED` 样本，不主动等待 GPU。
+- `timer_active`：动画 Timer 是否仍在运行；稳定窗口应为 `false`。
 - `drawn_fences`：当前参与折射渲染的可见 Fence 数量。
 - `current_max_velocity_px_s`：写日志时 Fence 的当前最大移动速度。
 - `max_velocity_px_s`：5 秒统计窗口内捕获到的最大移动速度，短拖动也不会丢失。
@@ -72,6 +74,22 @@ JSONL 事件包括：
 - `fences[].velocity_px_s`：每个 Fence 的移动速度。
 - `fences[].lens_strength_px`：动态折射位移强度。
 - `fences[].peak_velocity_px_s` / `peak_lens_strength_px`：每个 Fence 在统计窗口内的峰值。
+
+分析日志：
+
+```bash
+python3 experiments/analyze_lensing_log.py /tmp/liquid-glass-demo.jsonl
+```
+
+低功耗边缘-only 档：
+
+```bash
+export UKUI_FENCES_GLASS_CENTER_TRANSMISSION=0
+export UKUI_FENCES_GLASS_SPECULAR_GAIN=1.15
+export UKUI_FENCES_GLASS_ACTIVE_FRAME_MS=50
+```
+
+此模式使用 GL scissor 仅栅格化四条边带，避免透明中心仍消耗 FTG340 fragment 计算。
 
 ## Demo 验收建议
 
@@ -90,15 +108,19 @@ JSONL 事件包括：
 - OpenGL context：4.6，GLSL 4.60，Shader 编译和链接通过。
 - GPU：`Phytium FTG340`，Overlay 获得 8-bit alpha buffer。
 - 5 个 Fence 共用一张 1921×1201 壁纸纹理，拖动与点击不被透明 Overlay 截获。
-- 稳态 `avg_submit_ms` 约 0.38–0.60 ms；首次纹理/窗口热身阶段出现约 26–27 ms 的单帧峰值。
-- 自动拖动实验捕获到 361.6 px/s 峰值速度，动态折射强度由 7.5 px 提升至 8.90 px，停止后平滑回落。
+- V2 默认档稳定 `avg_submit_ms` 约 0.35–0.57 ms；慢拖达到 10.25 px，快拖达到 12.52 px，5 个统计窗口中 4 个为 `timer_active=false`。
+- 默认 11% 中央透射在 FTG340 上部分 GPU 窗口为 3–10 ms，未达到 2 ms 目标；建议该 GPU 使用低功耗档。
+- 低功耗边缘-only/scissor 档动态窗口 CPU submit 约 0.63 ms、GPU 约 2.34 ms，峰值折射 11.74 px；GPU 已显著下降但仍略高于 2 ms 理想值。
+- 关闭 GPU Timer Query 的对照组稳定 CPU 加权均值为 0.83 ms、动态窗口约 0.73 ms；Query 不是稳定 CPU 成本的主要来源。
+- 折叠/展开自动化日志确认目标 Fence 高度 `154 → 34 → 154`，且每次事件结束后 Timer 均回到停止状态。
+- 首次 context/纹理热身 CPU 峰值约 27–32 ms，单独记录且不计入稳定均值。
 - `UKUI_FENCES_LENSING_DEMO=0` 时不创建 Overlay，原 v0.5.0 玻璃路径保持可用。
 
 ## 当前已知限制
 
 - Demo 使用圆角矩形 SDF，暂未复刻 Fence 的“壁纸磁吸异形轮廓”；磁吸形状仍由原 QWidget 路径负责。
 - Overlay 是全桌面透明 QOpenGLWidget，适合验证视觉和 FTG340 性能，不代表最终生产架构。
-- 当前记录的是 CPU submit 时间，不是 GPU timer query；若 Demo 验证通过，下一阶段再加入 `GL_TIME_ELAPSED` 或平台侧 GPU 性能统计。
+- FTG340 的异步 Timer Query 已可用；GPU 耗时仍存在驱动/调度波动，不能与 CPU submit 相互替代。
 - 标题栏顶部折射刻意减弱，避免影响现有标题文字可读性。
 
 ## 下一阶段判定
