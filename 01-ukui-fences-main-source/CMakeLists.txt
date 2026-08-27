@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ukui-fences VERSION 0.4.1 LANGUAGES CXX)
+project(ukui-fences VERSION 0.5.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CTest)
@@ -43,6 +43,9 @@ add_executable(ukui-fences
     src/FenceWidget.cpp
     src/DesktopIcon.cpp
     src/FileClipboard.cpp
+    src/GlassStyle.cpp
+    src/KWinBlur.cpp
+    src/MenuStyle.cpp
     src/OfficeDocumentFactory.cpp
     src/SystemMonitor.cpp
     src/SmartSpaceWidget.cpp
@@ -84,13 +87,39 @@ if(UKUI_FENCES_BUILD_GLASS_EXPERIMENTS)
     endif()
 
     add_executable(glass_visual_preview
-        experiments/glass_visual_preview.cpp)
+        experiments/glass_visual_preview.cpp
+        src/GlassStyle.cpp)
     target_include_directories(glass_visual_preview PRIVATE src/)
     target_link_libraries(glass_visual_preview PRIVATE
         Qt5::Core Qt5::Gui Threads::Threads)
+
+    add_executable(kwin_blur_probe
+        experiments/kwin_blur_probe.cpp
+        src/KWinBlur.cpp
+        src/MenuStyle.cpp)
+    target_include_directories(kwin_blur_probe PRIVATE
+        src/ ${UKUI_FENCES_X11_INCLUDE_DIR})
+    target_link_libraries(kwin_blur_probe PRIVATE
+        Qt5::Core Qt5::Gui Qt5::Widgets ${UKUI_FENCES_X11_LIBRARY})
 endif()
 
 if(BUILD_TESTING)
+    add_executable(glass_style_test
+        tests/test_glass_style.cpp
+        src/GlassStyle.cpp)
+    target_include_directories(glass_style_test PRIVATE src/)
+    target_link_libraries(glass_style_test PRIVATE Qt5::Core Qt5::Gui)
+    add_test(NAME glass_style COMMAND glass_style_test)
+
+    add_executable(kwin_blur_codec_test
+        tests/test_kwin_blur.cpp
+        src/KWinBlur.cpp)
+    target_include_directories(kwin_blur_codec_test PRIVATE
+        src/ ${UKUI_FENCES_X11_INCLUDE_DIR})
+    target_link_libraries(kwin_blur_codec_test PRIVATE
+        Qt5::Core Qt5::Gui Qt5::Widgets ${UKUI_FENCES_X11_LIBRARY})
+    add_test(NAME kwin_blur_codec COMMAND kwin_blur_codec_test)
+
     add_executable(stack_blur_test tests/test_stack_blur.cpp)
     target_include_directories(stack_blur_test PRIVATE src/)
     target_link_libraries(stack_blur_test PRIVATE

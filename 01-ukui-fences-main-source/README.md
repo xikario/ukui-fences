@@ -1,4 +1,4 @@
-# ukui-fences v0.4.1 — 桌面分区管理工具
+# ukui-fences v0.5.0 — 桌面分区管理工具
 
 ## 产品概述
 
@@ -22,6 +22,7 @@
 | **创建围栏** | 任意数量、任意大小的半透明矩形分区，用于将桌面图标分组 |
 | **自定义标题与图标** | 每个围栏可设置标题，从 10 个内置 SVG 图标组中选择图标 |
 | **背景自定义** | 可配置的背景颜色和透明度 |
+| **液态玻璃** | 壁纸预模糊缓存、四边光影/微噪点，以及 KWin 实时模糊回退 |
 | **折叠/展开** | 围栏可折叠为仅显示标题栏的最小化状态 |
 | **锁定功能** | 锁定后禁止移动/缩放，但允许文件拖入 |
 | **图标排序** | 围栏内图标支持按名称、类型或修改时间排序 |
@@ -163,7 +164,7 @@
 ## 项目结构
 
 ```
-ukui-fences-v0.4.1/
+ukui-fences-v0.5.0/
 ├── CMakeLists.txt              # CMake 构建配置
 ├── assets/
 │   └── fence-icons/            # 10 个预制 SVG 围栏图标
@@ -180,13 +181,15 @@ ukui-fences-v0.4.1/
 │   ├── DesktopItem.h           # 桌面项数据结构（内联实现）
 │   ├── FenceWidget.h/.cpp      # 围栏小部件绘制与交互
 │   ├── FileClipboard.h/.cpp    # 文件剪贴板操作
-│   ├── MenuStyle.h             # Ventura 风格右键菜单样式表
+│   ├── GlassStyle.h/.cpp       # 统一玻璃 tint、四边光影和微噪点
+│   ├── KWinBlur.h/.cpp         # KWin Blur X11 协议与兼容回退
+│   ├── MenuStyle.h/.cpp        # 玻璃右键菜单与实时模糊
 │   ├── SystemMonitor.h/.cpp    # 嵌入式系统监控小部件
 │   └── SmartSpaceWidget.h/.cpp # 智能空间 UI、索引、保存规则
 ├── scripts/
 │   └── smart_space_indexer.py # 增量文档/OCR/Provider 索引器
 ├── tests/                       # 索引单测与 Xvfb 交互截图测试
-└── docs/SMART_SPACE.md          # 智能空间配置和协议
+└── docs/                        # 智能空间协议与液态玻璃实施记录
 ```
 
 ## 依赖项

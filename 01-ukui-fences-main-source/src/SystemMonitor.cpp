@@ -1,5 +1,6 @@
 #include "SystemMonitor.h"
 #include "DesktopCanvas.h"
+#include "GlassStyle.h"
 #include "MenuStyle.h"
 
 #include <QAction>
@@ -1152,17 +1153,12 @@ void SystemMonitor::paintEvent(QPaintEvent *)
         wantsGlass && canvas &&
         canvas->paintBlurredWallpaper(painter, this, glassPath);
     if (hasBlurredBackdrop) {
-        QColor tint = colors.panel;
-        tint.setAlpha(qMin(150, tint.alpha()));
-        painter.fillPath(glassPath, tint);
-
-        QLinearGradient highlight(0, 0, 0, qMin(64, height() / 3));
-        highlight.setColorAt(0.0, QColor(255, 255, 255, 54));
-        highlight.setColorAt(1.0, QColor(255, 255, 255, 0));
-        painter.save();
-        painter.setClipPath(glassPath);
-        painter.fillRect(rect(), highlight);
-        painter.restore();
+        const bool lightSurface = qGray(colors.panel.rgb()) > 155;
+        const GlassStyle::Profile glass = GlassStyle::profile(
+            GlassStyle::SurfaceRole::Monitor,
+            colors.panel, lightSurface);
+        GlassStyle::paintLayers(
+            painter, glassPath, QRectF(rect()), glass, false);
     }
 
     painter.scale(m_scale, m_scale);

@@ -3,6 +3,7 @@
 #include "DesktopIcon.h"
 #include "DesktopCanvas.h"
 #include "FileClipboard.h"
+#include "GlassStyle.h"
 #include "MenuStyle.h"
 
 #include <QPainter>
@@ -1424,41 +1425,14 @@ void FenceWidget::paintEvent(QPaintEvent *)
         p.fillPath(bgPath, m_color);
     }
 
-    // ② 半透明 Tint 色调层（玻璃底色）
-    {
-        QColor tint = m_color;
-        tint.setAlpha(qMin(255, qMax(30, m_color.alpha())));
-        p.fillPath(bgPath, tint);
-    }
-
-    // ③ 顶部边缘高光渐变（Fresnel 近似 — Tier 1）
-    {
-        QLinearGradient highlight(0, 0, 0, qMin(50.0, r.height() * 0.3));
-        highlight.setColorAt(0.0, QColor(255, 255, 255, 55));
-        highlight.setColorAt(1.0, QColor(255, 255, 255, 0));
-        p.save();
-        p.setClipPath(bgPath);
-        p.fillRect(QRectF(0, 0, r.width(), qMin(50.0, r.height() * 0.3)),
-                   highlight);
-        p.restore();
-    }
-
-    // ④ 底部内阴影（深度感 — Tier 1）
-    {
-        const double shadowH = qMin(35.0, r.height() * 0.2);
-        QLinearGradient innerShadow(0, r.height() - shadowH, 0, r.height());
-        innerShadow.setColorAt(0.0, QColor(0, 0, 0, 0));
-        innerShadow.setColorAt(1.0, QColor(0, 0, 0, 28));
-        p.save();
-        p.setClipPath(bgPath);
-        p.fillRect(QRectF(0, r.height() - shadowH, r.width(), shadowH),
-                   innerShadow);
-        p.restore();
-    }
+    const bool lightSurface = qGray(m_color.rgb()) > 155;
+    const GlassStyle::Profile glass = GlassStyle::profile(
+        GlassStyle::SurfaceRole::Fence, m_color, lightSurface);
+    GlassStyle::paintLayers(p, bgPath, r, glass, false);
 
     // 标题栏（略深，与主体平滑衔接）
-    QColor titleBg = m_color;
-    titleBg.setAlpha(qMin(255, m_color.alpha() + 60));
+    QColor titleBg = glass.tint.darker(lightSurface ? 104 : 118);
+    titleBg.setAlpha(qMin(220, glass.tint.alpha() + 48));
     QPainterPath titlePath;
     titlePath.addRoundedRect(QRectF(0, 0, width(), TITLE_H), 10, 10);
     QPainterPath cut;
@@ -1469,11 +1443,8 @@ void FenceWidget::paintEvent(QPaintEvent *)
     // ⑤ 边框（Tier 1 — 半透明高光边框 + 编辑模式金色边框）
     if (m_editMode)
         p.setPen(QPen(QColor(255, 200, 0, 230), 2));
-    else {
-        QColor border = m_hasTitleFont ? m_titleFontColor : QColor(Qt::white);
-        border.setAlpha(45);
-        p.setPen(QPen(border, 1));
-    }
+    else
+        p.setPen(QPen(glass.border, glass.borderWidth));
     p.drawPath(bgPath);
 
     // ── 标题图标 + 标题文字 ────────────────────────────────────

@@ -4,9 +4,9 @@
 
 ## 当前结论
 
-Tier 0 已完成首轮代码集成：桌面壁纸在缓存重建时执行一次 StackBlur，Fence、SystemMonitor 和 SmartSpaceWidget 在绘制阶段按自身屏幕位置采样模糊缓存。组件移动时不重新模糊，只重新选择缓存切片。
+v0.5.0 已完成 Tier 0、Tier 1 与 Tier 2：Fence、SystemMonitor 和 SmartSpaceWidget 共享静态模糊缓存与统一玻璃质感层；SmartSpace 置顶窗口和所有统一样式的 QMenu 在 KWin Blur 可用时请求实时合成器模糊，不可用时自动保留半透明 tint 与 Tier 0 回退。
 
-FTG340 的 `QOpenGLWidget` 真机实验也已通过，后续可以在小面积组件上继续评估 Tier 3 Shader；当前生产路径仍保持纯 QWidget/QPainter，不引入 OpenGL 运行时依赖。
+FTG340 的 `QOpenGLWidget` 真机实验仍保持通过，但 v0.5.0 生产路径不依赖 Shader。OpenGL 仅保留为独立实验目标，避免给普通 QWidget 桌面路径增加驱动风险。
 
 ## 任务清单
 
@@ -32,7 +32,7 @@ shader.fragment=pass
 shader.link=pass
 ```
 
-实验 5 产物：`docs/images/liquid-glass-visual-preview.png`。预评审中壁纸结构在三个玻璃区域内均能保持位置连续，28px 模糊、顶部高光、底部内阴影和 1px 边框可正常合成；浅色壁纸区域仍需在 Tier 1 阶段继续微调 tint 对比度。
+实验 5 产物：`docs/images/liquid-glass-visual-preview.png`。预评审中壁纸结构在三个玻璃区域内均能保持位置连续，28px 模糊、四向高光/内阴影、微噪点和 1px 边框可正常合成；浅色区域的 tint 对比度已在 Tier 1 统一参数中完成校准。
 
 ### 第一阶段：Tier 0 — 静态毛玻璃预缓存
 
@@ -51,17 +51,39 @@ shader.link=pass
 - [x] 底部内阴影
 - [x] 1px 半透明高光边框
 - [x] 标题栏加深 tint（Fence）
-- [ ] 左侧高光与右侧内阴影
-- [ ] 微噪点预生成 tile
-- [ ] 右键菜单玻璃样式增强
-- [ ] 统一三类组件的 tint/对比度参数
+- [x] 左侧高光与右侧内阴影
+- [x] 微噪点预生成 tile（64×64，确定性、预乘 Alpha）
+- [x] 右键菜单玻璃样式增强
+- [x] 统一三类组件的 tint/对比度参数
 
 ### 第三阶段：Tier 2 — 合成器委托模糊
 
-- [ ] KWin Blur X11 协议封装函数
-- [ ] SmartSpaceWidget 置顶模式实时模糊
-- [ ] QMenu 弹出菜单实时模糊
-- [ ] 合成器兼容性回退测试
+- [x] KWin Blur X11 协议封装函数
+- [x] SmartSpaceWidget 置顶模式实时模糊
+- [x] QMenu 弹出菜单实时模糊
+- [x] 合成器兼容性回退测试
+
+Tier 2 真机协议探针：
+
+```text
+kwin.blur.supported=true
+kwin.blur.requested=true
+kwin.blur.property=present
+kwin.blur.menu_property=present
+kwin.blur.clear=pass
+kwin.blur.removed=true
+```
+
+Xvfb 无合成器回退探针：
+
+```text
+kwin.blur.supported=false
+kwin.blur.requested=false
+kwin.blur.property=absent
+kwin.blur.menu_property=absent
+kwin.blur.clear=pass
+kwin.blur.removed=true
+```
 
 ## 性能记录
 
@@ -76,17 +98,15 @@ shader.link=pass
 
 ## 构建与验证
 
-- `ukui-fences`、`qopenglwidget_shader_probe`、`glass_visual_preview` 构建通过。
-- `stack_blur` 和 `office_document_factory` 测试通过。
-- 完整 CTest：8 项中 5 项通过；3 项 UI/资源集成测试未通过：
+- `ukui-fences`、`qopenglwidget_shader_probe`、`glass_visual_preview`、`kwin_blur_probe` 构建通过。
+- `glass_style`、`kwin_blur_codec`、`stack_blur`、`office_document_factory`、`smart_space_indexer`、`smart_space_knowledge` 和 `smart_space_new_features_smoke` 测试通过。
+- 完整 CTest：10 项中 7 项通过；3 项既有 UI/资源集成测试未通过：
   - `smart_space_ui_smoke`：Xvfb/DBus 会话提前断开并触发外部桌面应用。
   - `smart_space_policy_smoke`：xdotool 未在固定坐标打开设置窗口。
   - `smart_space_resource_benchmark`：25,000 文件 fast-full 流程超时。
 
-这三项失败尚未归因到玻璃绘制改动，不能据此宣告全量回归通过；进入 Tier 2 前应单独稳定测试夹具并重跑。
+这三项历史失败尚未归因到玻璃绘制改动；v0.5.0 的玻璃模块、KWin 属性编解码、真机协议和无合成器回退均有独立验证覆盖。
 
-## 下一步
+## 收尾结论
 
-1. 在实际桌面会话做一次人工视觉验收，确认深/浅壁纸下的 tint 和文字对比度。
-2. 完成 Tier 1 剩余的左右边缘层、微噪点和菜单样式。
-3. 封装 `_KDE_NET_WM_BLUR_BEHIND_REGION`，仅用于 SmartSpace 置顶窗口和 QMenu，并保留当前 Tier 0 回退。
+Tier 0–2 已在 v0.5.0 分支收尾。后续若继续探索 Tier 3，只应针对小面积折射/色散元素单独启用，并继续保留当前 QWidget/QPainter 与 KWin Blur 回退链路。

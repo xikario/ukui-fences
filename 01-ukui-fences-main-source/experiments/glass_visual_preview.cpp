@@ -1,4 +1,5 @@
 #include "StackBlur.h"
+#include "GlassStyle.h"
 
 #include <QElapsedTimer>
 #include <QGuiApplication>
@@ -12,7 +13,8 @@ namespace {
 
 void paintGlassPanel(QPainter &painter, const QImage &blurred,
                      const QRect &rect, const QColor &tint,
-                     const QString &title, int radius)
+                     const QString &title, int radius,
+                     GlassStyle::SurfaceRole role)
 {
     QPainterPath path;
     path.addRoundedRect(QRectF(rect), radius, radius);
@@ -20,24 +22,9 @@ void paintGlassPanel(QPainter &painter, const QImage &blurred,
     painter.save();
     painter.setClipPath(path);
     painter.drawImage(rect, blurred, rect);
-    painter.fillPath(path, tint);
-
-    QLinearGradient top(rect.topLeft(),
-                        QPoint(rect.left(), rect.top() + qMin(72, rect.height() / 3)));
-    top.setColorAt(0.0, QColor(255, 255, 255, 62));
-    top.setColorAt(1.0, QColor(255, 255, 255, 0));
-    painter.fillRect(rect, top);
-
-    QLinearGradient bottom(QPoint(rect.left(), rect.bottom() - 48),
-                           rect.bottomLeft());
-    bottom.setColorAt(0.0, QColor(0, 0, 0, 0));
-    bottom.setColorAt(1.0, QColor(0, 0, 0, 34));
-    painter.fillRect(rect, bottom);
     painter.restore();
-
-    painter.setPen(QPen(QColor(255, 255, 255, 70), 1));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawPath(path);
+    GlassStyle::paintLayers(
+        painter, path, QRectF(rect), GlassStyle::profile(role, tint, false));
 
     painter.setPen(Qt::white);
     QFont titleFont = painter.font();
@@ -105,11 +92,14 @@ int main(int argc, char **argv)
                      qRound(rect.width() * sx), qRound(rect.height() * sy));
     };
     paintGlassPanel(painter, blurred, scaledRect(QRect(90, 110, 390, 310)),
-                    QColor(26, 39, 61, 142), QStringLiteral("Fence 区域"), 16);
+                    QColor(26, 39, 61, 142), QStringLiteral("Fence 区域"), 16,
+                    GlassStyle::SurfaceRole::Fence);
     paintGlassPanel(painter, blurred, scaledRect(QRect(520, 180, 820, 260)),
-                    QColor(18, 28, 46, 152), QStringLiteral("System Monitor"), 18);
+                    QColor(18, 28, 46, 152), QStringLiteral("System Monitor"), 18,
+                    GlassStyle::SurfaceRole::Monitor);
     paintGlassPanel(painter, blurred, scaledRect(QRect(210, 510, 1010, 280)),
-                    QColor(15, 23, 42, 160), QStringLiteral("Smart Space"), 20);
+                    QColor(15, 23, 42, 160), QStringLiteral("Smart Space"), 20,
+                    GlassStyle::SurfaceRole::SmartSpace);
     painter.end();
 
     if (!canvas.save(output)) {

@@ -2395,6 +2395,7 @@ void DesktopCanvas::applySmartSpaceWindowMode(bool alwaysOnTop)
         m_smartSpace->resize(widgetSize);
         m_smartSpace->move(globalPosition);
     } else {
+        m_smartSpace->clearCompositorBlur();
         m_smartSpace->setAttribute(Qt::WA_ShowWithoutActivating, false);
         m_smartSpace->setParent(this, Qt::Widget);
         // Desktop children deliberately use the stable binary-mask path: on
@@ -2407,6 +2408,10 @@ void DesktopCanvas::applySmartSpaceWindowMode(bool alwaysOnTop)
     if (wasVisible) {
         m_smartSpace->show();
         m_smartSpace->raise();
+    }
+    if (alwaysOnTop) {
+        QTimer::singleShot(
+            0, m_smartSpace, &SmartSpaceWidget::refreshCompositorBlur);
     }
 }
 

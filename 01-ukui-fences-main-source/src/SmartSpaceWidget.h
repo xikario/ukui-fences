@@ -30,6 +30,7 @@ class QMouseEvent;
 class QMoveEvent;
 class QProcess;
 class QResizeEvent;
+class QShowEvent;
 class QScrollArea;
 class QSizeGrip;
 class QLabel;
@@ -72,6 +73,9 @@ public:
     bool alwaysOnTop() const { return m_alwaysOnTop; }
     void setResultDensity(int density);
     void recreateNativeSurface(bool translucent);
+    void refreshCompositorBlur();
+    void clearCompositorBlur();
+    bool compositorBlurActive() const { return m_compositorBlurActive; }
     void hideToNearestEdge();
     void revealFromEdge();
     bool edgeHidden() const { return m_edgeHidden; }
@@ -90,6 +94,7 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void moveEvent(QMoveEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -207,6 +212,7 @@ private:
     int m_themeMode = 0;
     bool m_autoStart = false;
     bool m_alwaysOnTop = false;
+    bool m_compositorBlurActive = false;
     bool m_idleFullIndex = false;
     bool m_ocrBackfill = false;
     bool m_idleIndexCancelled = false;

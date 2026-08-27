@@ -2,6 +2,9 @@
 
 #include "DesktopCanvas.h"
 #include "DesktopItem.h"
+#include "GlassStyle.h"
+#include "KWinBlur.h"
+#include "MenuStyle.h"
 #include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
@@ -57,6 +60,7 @@
 #include <QShortcut>
 #include <QSettings>
 #include <QSet>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -1514,31 +1518,7 @@ void SmartSpaceWidget::applyMenuTheme(QMenu *menu) const
 {
     if (!menu)
         return;
-
-    // A QMenu is a separate native window.  On its first show UKUI can expose
-    // the opaque backing rectangle for one frame before the stylesheet's
-    // rounded background is polished.  Prepare translucency and a matching
-    // mask before mapping the window so the first and later openings match.
-    menu->setAttribute(Qt::WA_TranslucentBackground, true);
-    menu->setAutoFillBackground(false);
-    if (!menu->property("smartRoundedMenuPrepared").toBool()) {
-        menu->setProperty("smartRoundedMenuPrepared", true);
-        connect(menu, &QMenu::aboutToShow, menu, [menu] {
-            auto applyRoundedMask = [menu] {
-                if (menu->width() <= 1 || menu->height() <= 1)
-                    return;
-                QPainterPath path;
-                path.addRoundedRect(
-                    QRectF(menu->rect()).adjusted(0.5, 0.5, -0.5, -0.5),
-                    12.0, 12.0);
-                menu->setMask(QRegion(path.toFillPolygon().toPolygon()));
-            };
-            menu->ensurePolished();
-            menu->adjustSize();
-            applyRoundedMask();
-            QTimer::singleShot(0, menu, applyRoundedMask);
-        });
-    }
+    MenuStyle::prepareGlassMenu(menu);
 
     const bool extColors = (m_themeMode == 6 && m_customColorsEnabled);
     const qreal customOpacity = qBound(25, m_customOpacity, 100) / 100.0;
@@ -2086,6 +2066,8 @@ void SmartSpaceWidget::setAlwaysOnTop(bool enabled)
         updateActionState();
         return;
     }
+    if (!enabled)
+        clearCompositorBlur();
     m_alwaysOnTop = enabled;
     updateActionState();
     saveSettings();
@@ -2128,10 +2110,43 @@ void SmartSpaceWidget::recreateNativeSurface(bool translucent)
     // is insufficient: Qt otherwise keeps the old visual and the alpha edge
     // is discarded.  Destroy only native resources; QObject/widget state and
     // the index remain intact and children are recreated lazily on show().
+    clearCompositorBlur();
     destroy(true, true);
     setAttribute(Qt::WA_TranslucentBackground, translucent);
     setAttribute(Qt::WA_NoSystemBackground, translucent);
     updateRoundedMask();
+}
+
+void SmartSpaceWidget::refreshCompositorBlur()
+{
+    if (!m_alwaysOnTop || !isWindow() || m_edgeHidden ||
+        width() <= 1 || height() <= 1) {
+        clearCompositorBlur();
+        return;
+    }
+
+    QPainterPath path;
+    path.addRoundedRect(
+        QRectF(rect()).adjusted(1, 1, -1, -1), 16.0, 16.0);
+    const QRegion region(path.toFillPolygon().toPolygon());
+    const bool active = KWinBlur::request(this, region);
+    if (m_compositorBlurActive == active)
+        return;
+    m_compositorBlurActive = active;
+    setProperty("kwinBlurActive", active);
+    update();
+}
+
+void SmartSpaceWidget::clearCompositorBlur()
+{
+    if (testAttribute(Qt::WA_WState_Created))
+        KWinBlur::clear(this);
+    if (!m_compositorBlurActive &&
+        !property("kwinBlurActive").toBool())
+        return;
+    m_compositorBlurActive = false;
+    setProperty("kwinBlurActive", false);
+    update();
 }
 
 QPoint SmartSpaceWidget::boundedPosition(const QPoint &position) const
@@ -2207,6 +2222,7 @@ void SmartSpaceWidget::hideToNearestEdge()
         ? railAnchorGlobal : parentWidget()->mapFromGlobal(railAnchorGlobal);
 
     m_edgeHidden = true;
+    clearCompositorBlur();
     m_actionRail->hide();
     m_contentContainer->hide();
     m_edgeRevealButton->show();
@@ -2267,6 +2283,9 @@ void SmartSpaceWidget::revealFromEdge()
     updateRoundedMask();
     saveSettings();
     update();
+    if (m_alwaysOnTop)
+        QTimer::singleShot(0, this,
+                           &SmartSpaceWidget::refreshCompositorBlur);
 }
 
 void SmartSpaceWidget::updateRoundedMask()
@@ -5363,20 +5382,17 @@ void SmartSpaceWidget::paintEvent(QPaintEvent *event)
     const int radius = m_edgeHidden ? 13 : 16;
     path.addRoundedRect(rect().adjusted(1, 1, -1, -1), radius, radius);
     auto *canvas = qobject_cast<DesktopCanvas *>(parentWidget());
+    const bool liveCompositorBackdrop =
+        m_compositorBlurActive && isWindow();
     const bool hasBlurredBackdrop =
-        canvas && canvas->paintBlurredWallpaper(painter, this, path);
+        liveCompositorBackdrop ||
+        (canvas && canvas->paintBlurredWallpaper(painter, this, path));
     if (hasBlurredBackdrop) {
-        QColor tint = m_surfaceColor;
-        tint.setAlpha(m_themeMode == 2 ? 138 : 168);
-        painter.fillPath(path, tint);
-
-        QLinearGradient highlight(0, 0, 0, qMin(72, height() / 3));
-        highlight.setColorAt(0.0, QColor(255, 255, 255, 52));
-        highlight.setColorAt(1.0, QColor(255, 255, 255, 0));
-        painter.save();
-        painter.setClipPath(path);
-        painter.fillRect(rect(), highlight);
-        painter.restore();
+        const GlassStyle::Profile glass = GlassStyle::profile(
+            GlassStyle::SurfaceRole::SmartSpace,
+            m_surfaceColor, m_themeMode == 2);
+        GlassStyle::paintLayers(
+            painter, path, QRectF(rect()), glass, false);
     } else {
         QLinearGradient glass(rect().topLeft(), rect().bottomRight());
         QColor highlight = m_surfaceColor.lighter(112);
@@ -5417,6 +5433,17 @@ void SmartSpaceWidget::resizeEvent(QResizeEvent *event)
     m_expandedSize = size();
     saveSettings();
     emit geometryChanged();
+    if (m_alwaysOnTop)
+        QTimer::singleShot(0, this,
+                           &SmartSpaceWidget::refreshCompositorBlur);
+}
+
+void SmartSpaceWidget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (m_alwaysOnTop)
+        QTimer::singleShot(0, this,
+                           &SmartSpaceWidget::refreshCompositorBlur);
 }
 
 void SmartSpaceWidget::contextMenuEvent(QContextMenuEvent *event)
