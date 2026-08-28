@@ -21,6 +21,7 @@ class FenceWidget : public QWidget
 {
     Q_OBJECT
     friend class DesktopCanvas;
+    friend class DesktopLensingOverlay;
 public:
     explicit FenceWidget(const QString &title,
                          const QRect   &geo,

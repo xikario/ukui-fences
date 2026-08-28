@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -23,6 +24,7 @@
 #include <QOpenGLTexture>
 #include <QOpenGLWidget>
 #include <QPointer>
+#include <QSet>
 #include <QStandardPaths>
 #include <QSurfaceFormat>
 #include <QTimer>
@@ -47,6 +49,7 @@ namespace {
 
 constexpr int kMetricsIntervalMs = 5000;
 constexpr int kGpuQueryCount = 4;
+constexpr int kMagneticContourSamples = 64;
 
 qreal envReal(const char *name, qreal fallback, qreal minimum, qreal maximum)
 {
@@ -81,7 +84,6 @@ struct DemoConfig {
     qreal response = 0.35;
     qreal rimBandPx = 8.0;
     qreal edgeBandPx = 28.0;
-    qreal centerTransmission = 0.11;
     qreal specularGain = 1.38;
     qreal cornerRadiusPx = 10.0;
     int activeFrameMs = 33;
@@ -105,9 +107,6 @@ const DemoConfig &demoConfig()
         c.edgeBandPx = envReal(
             "UKUI_FENCES_GLASS_EDGE_BAND_PX", c.edgeBandPx, 8.0, 64.0);
         c.edgeBandPx = qMax(c.edgeBandPx, c.rimBandPx + 2.0);
-        c.centerTransmission = envReal(
-            "UKUI_FENCES_GLASS_CENTER_TRANSMISSION",
-            c.centerTransmission, 0.0, 0.35);
         c.specularGain = envReal(
             "UKUI_FENCES_GLASS_SPECULAR_GAIN", c.specularGain, 0.0, 3.0);
         c.activeFrameMs = envInt(
@@ -121,7 +120,8 @@ const DemoConfig &demoConfig()
 bool demoEnabled()
 {
     const QByteArray value = qgetenv("UKUI_FENCES_LENSING_DEMO").trimmed().toLower();
-    return value.isEmpty() || (value != "0" && value != "false" && value != "off");
+    return value == "1" || value == "true" ||
+           value == "on" || value == "yes";
 }
 
 QString glassLogPath()
@@ -177,21 +177,14 @@ class DesktopLensingOverlay final : public QOpenGLWidget,
 {
 public:
     explicit DesktopLensingOverlay(DesktopCanvas *canvas)
-        : QOpenGLWidget(canvas,
-              Qt::Tool |
-              Qt::FramelessWindowHint |
-              Qt::X11BypassWindowManagerHint |
-              Qt::WindowTransparentForInput |
-              Qt::WindowDoesNotAcceptFocus)
+        : QOpenGLWidget(canvas)
         , m_canvas(canvas)
         , m_config(demoConfig())
     {
         setObjectName(QStringLiteral("ukui-fences-lensing-overlay"));
         setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_AlwaysStackOnTop, true);
         setAttribute(Qt::WA_NoSystemBackground, false);
-        setAttribute(Qt::WA_ShowWithoutActivating, true);
-        setAttribute(Qt::WA_X11DoNotAcceptFocus, true);
         setAutoFillBackground(false);
         setFocusPolicy(Qt::NoFocus);
 
@@ -204,12 +197,27 @@ public:
         format.setStencilBufferSize(0);
         setFormat(format);
 
-        setGeometry(QRect(canvas->mapToGlobal(QPoint(0, 0)), canvas->size()));
+        const QRect initialBounds = overlayBounds();
+        m_canvasOrigin = initialBounds.topLeft();
+        setGeometry(initialBounds);
+        connect(canvas, &DesktopCanvas::wallpaperCacheChanged,
+                this, [this] {
+            m_textureSourceKey = 0;
+            writeGlassLog(QStringLiteral("wallpaper_cache_changed"));
+            // Refresh is an explicit, rare action.  Force one synchronous GL
+            // frame here so an obscured/unfocused desktop cannot coalesce the
+            // update away; normal mouse/motion frames remain event-driven.
+            QTimer::singleShot(0, this, [this] {
+                if (!m_canvas || !isVisible())
+                    return;
+                updateMotionState();
+                repaint();
+            });
+        });
         show();
-        // This is an output-only native window. WindowTransparentForInput is
-        // enforced by the X11 platform plugin, so the full-canvas surface can
-        // never become the target of a click, touch or wheel event.
-        raise();
+        // Qt composites a transparent QOpenGLWidget with sibling widgets only
+        // in AlwaysStackOnTop mode.  The shader's center is fully transparent,
+        // so Fence content remains untouched while the outward band is visible.
         m_motionClock.start();
         m_frameThrottleClock.start();
 
@@ -231,7 +239,7 @@ public:
         m_metricsTimer.start();
 
         QTimer::singleShot(1200, this, [this] {
-            if (!isValid()) {
+            if (isVisible() && !isValid()) {
                 QJsonObject fields;
                 fields.insert(QStringLiteral("fallback"),
                               QStringLiteral("qopenglwidget_invalid"));
@@ -242,12 +250,24 @@ public:
         });
 
         QJsonObject fields;
-        fields.insert(QStringLiteral("width"), canvas->width());
-        fields.insert(QStringLiteral("height"), canvas->height());
+        fields.insert(QStringLiteral("canvas_width"), canvas->width());
+        fields.insert(QStringLiteral("canvas_height"), canvas->height());
+        fields.insert(QStringLiteral("overlay_width"), width());
+        fields.insert(QStringLiteral("overlay_height"), height());
+        fields.insert(QStringLiteral("render_mode"),
+                      QStringLiteral("active_fence_edge_only"));
         fields.insert(QStringLiteral("active_frame_ms"), m_config.activeFrameMs);
         fields.insert(QStringLiteral("idle_refresh"),
                       QStringLiteral("event_driven"));
         writeGlassLog(QStringLiteral("overlay_created"), fields);
+
+        // DesktopCanvas maps itself before loading and blurring the wallpaper.
+        // Creating a native QOpenGLWidget from that first Show event may paint
+        // synchronously while the cache is still empty.  Retry after the
+        // canvas constructor/event burst completes; the timer stops again as
+        // soon as the static frame has been submitted.
+        QTimer::singleShot(0, this, [this] { requestInteractiveFrame(); });
+        QTimer::singleShot(250, this, [this] { requestInteractiveFrame(); });
     }
 
     ~DesktopLensingOverlay() override
@@ -266,11 +286,16 @@ public:
     {
         if (!m_canvas)
             return;
-        const QRect canvasGeometry(
-            m_canvas->mapToGlobal(QPoint(0, 0)), m_canvas->size());
+        const QRect canvasGeometry = overlayBounds();
+        if (!canvasGeometry.isValid() || canvasGeometry.isEmpty()) {
+            hide();
+            return;
+        }
+        m_canvasOrigin = canvasGeometry.topLeft();
         if (geometry() != canvasGeometry)
             setGeometry(canvasGeometry);
-        raise();
+        if (!isVisible() && m_canvas->isVisible())
+            show();
         requestInteractiveFrame();
     }
 
@@ -321,14 +346,20 @@ protected:
             uniform vec2 u_wallpaperSize;
             uniform vec2 u_widgetSize;
             uniform vec2 u_widgetOrigin;
+            uniform vec2 u_drawSize;
+            uniform vec2 u_drawOffset;
             uniform vec2 u_cursor;
             uniform vec2 u_velocity;
             uniform float u_rimBand;
             uniform float u_edgeBand;
             uniform float u_cornerRadius;
             uniform float u_lensStrength;
-            uniform float u_centerTransmission;
             uniform float u_specularGain;
+            uniform int u_magneticEdge;
+            uniform int u_contourCount;
+            uniform float u_contourAxisMin;
+            uniform float u_contourAxisMax;
+            uniform float u_contourCoordinate[64];
 
             float sdRoundBox(vec2 p, vec2 halfSize, float radius)
             {
@@ -337,57 +368,102 @@ protected:
                      + min(max(q.x, q.y), 0.0) - radius;
             }
 
-            vec2 sdfNormal(vec2 local)
+            float roundedSignedDistance(vec2 local)
+            {
+                vec2 center = u_widgetSize * 0.5;
+                vec2 halfSize = max(vec2(1.0), center - vec2(0.75));
+                return sdRoundBox(
+                    local - center, halfSize, u_cornerRadius);
+            }
+
+            vec2 roundedNormal(vec2 local)
             {
                 vec2 center = u_widgetSize * 0.5;
                 vec2 halfSize = max(vec2(1.0), center - vec2(0.75));
                 vec2 p = local - center;
-                float e = 1.25;
-                float dx = sdRoundBox(p + vec2(e, 0.0), halfSize, u_cornerRadius)
-                         - sdRoundBox(p - vec2(e, 0.0), halfSize, u_cornerRadius);
-                float dy = sdRoundBox(p + vec2(0.0, e), halfSize, u_cornerRadius)
-                         - sdRoundBox(p - vec2(0.0, e), halfSize, u_cornerRadius);
-                vec2 n = vec2(dx, dy);
-                return length(n) > 0.0001 ? normalize(n) : vec2(0.0, -1.0);
+                vec2 q = abs(p) - (halfSize - vec2(u_cornerRadius));
+                vec2 corner = max(q, vec2(0.0));
+                if (length(corner) > 0.001)
+                    return normalize(corner * sign(p));
+                return q.x > q.y
+                    ? vec2(sign(p.x), 0.0)
+                    : vec2(0.0, sign(p.y));
+            }
+
+            void magneticData(vec2 local,
+                              out float distance,
+                              out vec2 normal)
+            {
+                if (u_magneticEdge == 0 || u_contourCount < 2) {
+                    distance = -100000.0;
+                    normal = vec2(0.0, -1.0);
+                    return;
+                }
+
+                bool vertical = u_magneticEdge == 1 || u_magneticEdge == 2;
+                float axis = vertical ? local.y : local.x;
+                float span = max(1.0, u_contourAxisMax - u_contourAxisMin);
+                float samplePosition = clamp(
+                    (axis - u_contourAxisMin) / span, 0.0, 1.0) * 63.0;
+                int sampleA = int(floor(samplePosition));
+                int sampleB = sampleA < 63 ? sampleA + 1 : 63;
+                float edgeCoordinate = mix(
+                    u_contourCoordinate[sampleA],
+                    u_contourCoordinate[sampleB],
+                    fract(samplePosition));
+                float axisStep = span / 63.0;
+                float slope = (u_contourCoordinate[sampleB]
+                             - u_contourCoordinate[sampleA])
+                            / max(axisStep, 0.001);
+
+                if (u_magneticEdge == 1) {
+                    distance = edgeCoordinate - local.x;
+                    normal = normalize(vec2(-1.0, slope));
+                } else if (u_magneticEdge == 2) {
+                    distance = local.x - edgeCoordinate;
+                    normal = normalize(vec2(1.0, -slope));
+                } else if (u_magneticEdge == 3) {
+                    distance = edgeCoordinate - local.y;
+                    normal = normalize(vec2(slope, -1.0));
+                } else {
+                    distance = local.y - edgeCoordinate;
+                    normal = normalize(vec2(-slope, 1.0));
+                }
             }
 
             void main()
             {
-                vec2 local = vec2(v_uv.x * u_widgetSize.x,
-                                  (1.0 - v_uv.y) * u_widgetSize.y);
+                vec2 local = u_drawOffset
+                           + vec2(v_uv.x * u_drawSize.x,
+                                  (1.0 - v_uv.y) * u_drawSize.y);
                 vec2 screenPx = u_widgetOrigin + local;
                 vec2 baseUv = screenPx / max(u_wallpaperSize, vec2(1.0));
                 baseUv.y = 1.0 - baseUv.y;
 
-                vec2 center = u_widgetSize * 0.5;
-                vec2 halfSize = max(vec2(1.0), center - vec2(0.75));
-                float sdf = sdRoundBox(local - center, halfSize, u_cornerRadius);
-                if (sdf > 0.5) {
+                float roundedDistance = roundedSignedDistance(local);
+                float magneticDistance;
+                vec2 magneticNormal;
+                magneticData(local, magneticDistance, magneticNormal);
+                float sdf = max(roundedDistance, magneticDistance);
+                // FenceWidget is painted above this child.  Draw only the
+                // outward lens band; the cached blur/tint and all content stay
+                // in the ordinary QWidget layer.
+                if (sdf < -0.5 || sdf > u_edgeBand) {
                     gl_FragColor = vec4(0.0);
                     return;
                 }
 
-                float insideDistance = max(0.0, -sdf);
-                float rim = 1.0 - smoothstep(0.0, u_rimBand, insideDistance);
-                float shoulder = smoothstep(0.0, u_rimBand, insideDistance)
+                float outsideDistance = max(0.0, sdf);
+                float rim = 1.0 - smoothstep(0.0, u_rimBand,
+                                              outsideDistance);
+                float shoulder = smoothstep(0.0, u_rimBand, outsideDistance)
                                * (1.0 - smoothstep(u_rimBand,
                                                    u_edgeBand,
-                                                   insideDistance));
+                                                   outsideDistance));
                 float edgeVisual = max(rim, shoulder * 0.58);
 
-                // Restore central structure with one GPU sample, no CPU blur.
-                if (edgeVisual <= 0.002) {
-                    if (u_centerTransmission <= 0.0001) {
-                        gl_FragColor = vec4(0.0);
-                        return;
-                    }
-                    vec4 original = texture2D(
-                        u_wallpaper, clamp(baseUv, 0.0, 1.0));
-                    gl_FragColor = vec4(original.rgb, u_centerTransmission);
-                    return;
-                }
-
-                vec2 normal = sdfNormal(local);
+                vec2 normal = magneticDistance > roundedDistance
+                    ? magneticNormal : roundedNormal(local);
                 float velocity = clamp(length(u_velocity) / 1800.0, 0.0, 1.0);
 
                 // Strong outward rim plus shallow reverse shoulder.
@@ -398,14 +474,13 @@ protected:
                             / max(u_wallpaperSize, vec2(1.0));
                 offset.y = -offset.y;
 
-                vec2 chroma = offset * 0.10;
-                float r = texture2D(u_wallpaper,
-                    clamp(baseUv + offset + chroma, 0.0, 1.0)).r;
-                vec4 gb = texture2D(u_wallpaper,
-                    clamp(baseUv + offset, 0.0, 1.0));
-                float b = texture2D(u_wallpaper,
-                    clamp(baseUv + offset - chroma, 0.0, 1.0)).b;
-                vec3 refracted = vec3(r, gb.g, b);
+                // One wallpaper fetch per fragment.  The earlier RGB split
+                // tripled texture bandwidth for a barely visible fringe on
+                // FTG340; warm/cool edge lighting below preserves material
+                // separation without the extra samples.
+                vec3 refracted = texture2D(
+                    u_wallpaper,
+                    clamp(baseUv + offset, 0.0, 1.0)).rgb;
 
                 vec2 cursorDelta = local - u_cursor;
                 float cursorGlow = exp(-dot(cursorDelta, cursorDelta) / 11500.0);
@@ -426,9 +501,7 @@ protected:
                                 + (vec3(specular) + warmCaustic + coolRim)
                                   * u_specularGain;
                 float edgeAlpha = edgeVisual * (0.34 + 0.38 * rim);
-                float centerAlpha = u_centerTransmission
-                                  * (1.0 - edgeVisual * 0.72);
-                float alpha = clamp(max(edgeAlpha, centerAlpha), 0.0, 0.84);
+                float alpha = clamp(edgeAlpha, 0.0, 0.84);
                 gl_FragColor = vec4(finalColor, alpha);
             }
         )GLSL";
@@ -533,9 +606,6 @@ protected:
         m_program.setUniformValue(
             "u_cornerRadius", static_cast<GLfloat>(m_config.cornerRadiusPx));
         m_program.setUniformValue(
-            "u_centerTransmission",
-            static_cast<GLfloat>(m_config.centerTransmission));
-        m_program.setUniformValue(
             "u_specularGain", static_cast<GLfloat>(m_config.specularGain));
         m_program.enableAttributeArray(m_positionAttribute);
         m_program.setAttributeArray(m_positionAttribute, GL_FLOAT, vertices, 2);
@@ -545,54 +615,126 @@ protected:
         const QPoint cursorCanvas = m_canvas->mapFromGlobal(QCursor::pos());
         for (FenceWidget *fence : m_canvas->m_fences) {
             if (!fence || !fence->isVisible() ||
-                fence->width() < 2 || fence->height() < 2)
+                fence->width() < 2 || fence->height() < 2 ||
+                fence->fenceId() != m_activeFenceId)
                 continue;
 
-            const QRect geo = fence->geometry().intersected(m_canvas->rect());
-            if (geo.width() < 2 || geo.height() < 2)
+            const QRect geoCanvas =
+                fence->geometry().intersected(m_canvas->rect());
+            if (geoCanvas.width() < 2 || geoCanvas.height() < 2)
                 continue;
+
+            const int padding = qCeil(m_config.edgeBandPx + 2.0);
+            const QRect drawRectCanvas = fence->geometry()
+                .adjusted(-padding, -padding, padding, padding)
+                .intersected(m_canvas->rect());
+            if (drawRectCanvas.width() < 2 || drawRectCanvas.height() < 2)
+                continue;
+            const QRect geo = geoCanvas.translated(-m_canvasOrigin);
+            const QRect drawRect =
+                drawRectCanvas.translated(-m_canvasOrigin);
 
             const FenceMotionState state = m_motion.value(fence->fenceId());
             const qreal speed = state.velocity.length();
             maxSpeed = qMax(maxSpeed, speed);
-            const int viewportY = height() - geo.y() - geo.height();
-            glViewport(qRound(geo.x() * dpr),
+            const int viewportY = height() - drawRect.y() - drawRect.height();
+            glViewport(qRound(drawRect.x() * dpr),
                        qRound(viewportY * dpr),
-                       qRound(geo.width() * dpr),
-                       qRound(geo.height() * dpr));
+                       qRound(drawRect.width() * dpr),
+                       qRound(drawRect.height() * dpr));
             m_program.setUniformValue(
                 "u_widgetSize", QVector2D(fence->width(), fence->height()));
             m_program.setUniformValue(
                 "u_widgetOrigin", QVector2D(fence->x(), fence->y()));
+            m_program.setUniformValue(
+                "u_drawSize", QVector2D(drawRect.width(), drawRect.height()));
+            m_program.setUniformValue(
+                "u_drawOffset",
+                QVector2D(drawRectCanvas.x() - fence->x(),
+                          drawRectCanvas.y() - fence->y()));
             m_program.setUniformValue(
                 "u_cursor", QVector2D(cursorCanvas.x() - fence->x(),
                                       cursorCanvas.y() - fence->y()));
             m_program.setUniformValue("u_velocity", state.velocity);
             m_program.setUniformValue(
                 "u_lensStrength", static_cast<GLfloat>(state.lensStrength));
-            if (m_config.centerTransmission <= 0.0001) {
-                // Scissor the quad into four bands so edge-only mode does not
-                // shade the fully transparent Fence center on FTG340.
-                const int viewportX = qRound(geo.x() * dpr);
-                const int viewportBaseY = qRound(viewportY * dpr);
-                const int viewportWidth = qRound(geo.width() * dpr);
-                const int viewportHeight = qRound(geo.height() * dpr);
-                const int band = qMin(
-                    qRound((m_config.edgeBandPx + 2.0) * dpr),
-                    qMin(viewportWidth, viewportHeight) / 2);
+
+            const bool hasMagneticContour =
+                fence->m_magneticEdge != FenceWidget::MagneticEdge::None &&
+                fence->m_magneticContour.size() >= 2;
+            const int sourceContourCount = hasMagneticContour
+                ? fence->m_magneticContour.size() : 0;
+            const bool verticalContour =
+                fence->m_magneticEdge == FenceWidget::MagneticEdge::Left ||
+                fence->m_magneticEdge == FenceWidget::MagneticEdge::Right;
+            std::array<GLfloat, kMagneticContourSamples> contourCoordinates {};
+            for (int i = 0; i < kMagneticContourSamples; ++i) {
+                if (!hasMagneticContour)
+                    break;
+                const qreal sourcePosition = i * (sourceContourCount - 1.0)
+                                           / (kMagneticContourSamples - 1.0);
+                const int sourceA = qBound(
+                    0, qFloor(sourcePosition), sourceContourCount - 1);
+                const int sourceB = qMin(sourceA + 1,
+                                         sourceContourCount - 1);
+                const qreal mixValue = sourcePosition - sourceA;
+                const QPointF point =
+                    fence->m_magneticContour[sourceA]
+                        * (1.0 - mixValue)
+                    + fence->m_magneticContour[sourceB] * mixValue;
+                contourCoordinates[i] = static_cast<GLfloat>(
+                    verticalContour ? point.x() : point.y());
+            }
+            m_program.setUniformValue(
+                "u_magneticEdge",
+                hasMagneticContour
+                    ? static_cast<int>(fence->m_magneticEdge) : 0);
+            m_program.setUniformValue(
+                "u_contourCount",
+                hasMagneticContour ? kMagneticContourSamples : 0);
+            if (hasMagneticContour) {
+                const QPointF first = fence->m_magneticContour.first();
+                const QPointF last = fence->m_magneticContour.last();
+                m_program.setUniformValue(
+                    "u_contourAxisMin",
+                    static_cast<GLfloat>(verticalContour
+                        ? first.y() : first.x()));
+                m_program.setUniformValue(
+                    "u_contourAxisMax",
+                    static_cast<GLfloat>(verticalContour
+                        ? last.y() : last.x()));
+                m_program.setUniformValueArray(
+                    "u_contourCoordinate", contourCoordinates.data(),
+                    kMagneticContourSamples, 1);
+            }
+
+            if (!hasMagneticContour) {
+                // For ordinary rounded rectangles, shade only the four outer
+                // strips.  The irregular contour case still needs the full
+                // bounding box because concave gaps can lie inside its QRect.
+                const QRect strips[] = {
+                    QRect(drawRect.left(), drawRect.top(),
+                          qMax(0, geo.left() - drawRect.left() + 1),
+                          drawRect.height()),
+                    QRect(geo.right(), drawRect.top(),
+                          qMax(0, drawRect.right() - geo.right() + 1),
+                          drawRect.height()),
+                    QRect(geo.left(), drawRect.top(), geo.width(),
+                          qMax(0, geo.top() - drawRect.top() + 1)),
+                    QRect(geo.left(), geo.bottom(), geo.width(),
+                          qMax(0, drawRect.bottom() - geo.bottom() + 1))
+                };
                 glEnable(GL_SCISSOR_TEST);
-                glScissor(viewportX, viewportBaseY, viewportWidth, band);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-                glScissor(viewportX, viewportBaseY + viewportHeight - band,
-                          viewportWidth, band);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-                glScissor(viewportX, viewportBaseY + band,
-                          band, qMax(0, viewportHeight - 2 * band));
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-                glScissor(viewportX + viewportWidth - band,
-                          viewportBaseY + band,
-                          band, qMax(0, viewportHeight - 2 * band));
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                for (const QRect &strip : strips) {
+                    if (strip.width() <= 0 || strip.height() <= 0)
+                        continue;
+                    glScissor(qRound(strip.x() * dpr),
+                              qRound((height() - strip.y() - strip.height())
+                                     * dpr),
+                              qRound(strip.width() * dpr),
+                              qRound(strip.height() * dpr));
+                    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                }
                 glDisable(GL_SCISSOR_TEST);
             } else {
                 glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -637,6 +779,59 @@ private:
         key ^= (static_cast<qint64>(m_canvas->width()) << 32);
         key ^= static_cast<qint64>(m_canvas->height());
         return key;
+    }
+
+    FenceWidget *activeFence()
+    {
+        if (!m_canvas)
+            return nullptr;
+
+        const QPoint cursor = m_canvas->mapFromGlobal(QCursor::pos());
+        for (auto it = m_canvas->m_fences.crbegin();
+             it != m_canvas->m_fences.crend(); ++it) {
+            FenceWidget *fence = *it;
+            if (!fence || !fence->isVisible() ||
+                fence->width() < 2 || fence->height() < 2)
+                continue;
+            if (fence->geometry().adjusted(-8, -8, 8, 8).contains(cursor)) {
+                m_activeFenceId = fence->fenceId();
+                return fence;
+            }
+        }
+
+        for (FenceWidget *fence : m_canvas->m_fences) {
+            if (fence && fence->isVisible() &&
+                fence->fenceId() == m_activeFenceId)
+                return fence;
+        }
+
+        // Prefer the wallpaper-matched Fence for the first demo frame, then
+        // keep the last active Fence until the pointer enters another one.
+        for (FenceWidget *fence : m_canvas->m_fences) {
+            if (fence && fence->isVisible() &&
+                fence->m_magneticEdge != FenceWidget::MagneticEdge::None) {
+                m_activeFenceId = fence->fenceId();
+                return fence;
+            }
+        }
+        for (FenceWidget *fence : m_canvas->m_fences) {
+            if (fence && fence->isVisible()) {
+                m_activeFenceId = fence->fenceId();
+                return fence;
+            }
+        }
+        return nullptr;
+    }
+
+    QRect overlayBounds()
+    {
+        FenceWidget *fence = activeFence();
+        if (!fence || !m_canvas)
+            return QRect();
+        const int padding = qCeil(m_config.edgeBandPx + 2.0);
+        return fence->geometry()
+            .adjusted(-padding, -padding, padding, padding)
+            .intersected(m_canvas->rect());
     }
 
     bool ensureTexture()
@@ -901,6 +1096,8 @@ private:
     QElapsedTimer m_frameThrottleClock;
     QHash<QString, FenceMotionState> m_motion;
     QSize m_textureSize;
+    QPoint m_canvasOrigin;
+    QString m_activeFenceId;
     qint64 m_textureSourceKey = 0;
     int m_positionAttribute = -1;
     int m_frameCount = 0;
@@ -940,7 +1137,7 @@ public:
             switch (event->type()) {
             case QEvent::Show:
             case QEvent::Polish:
-                ensureOverlay(canvas);
+                scheduleOverlay(canvas);
                 break;
             case QEvent::Resize:
             case QEvent::Move:
@@ -962,8 +1159,10 @@ public:
 
         if (event->type() == QEvent::MouseMove) {
             if (DesktopCanvas *canvas = canvasForObject(watched)) {
-                if (auto *overlay = overlayFor(canvas))
+                if (auto *overlay = overlayFor(canvas)) {
+                    overlay->syncToCanvas();
                     overlay->requestInteractiveFrame();
+                }
             }
         }
 
@@ -973,14 +1172,32 @@ public:
              event->type() == QEvent::Show ||
              event->type() == QEvent::Hide)) {
             if (DesktopCanvas *canvas = canvasForObject(watched)) {
-                if (auto *overlay = overlayFor(canvas))
+                if (auto *overlay = overlayFor(canvas)) {
+                    overlay->syncToCanvas();
                     overlay->requestInteractiveFrame();
+                }
             }
         }
         return QObject::eventFilter(watched, event);
     }
 
 private:
+    void scheduleOverlay(DesktopCanvas *canvas)
+    {
+        if (!canvas || overlayFor(canvas) || m_pending.contains(canvas))
+            return;
+
+        m_pending.insert(canvas);
+        // The canvas maps itself near the start of its constructor and loads
+        // the wallpaper later.  Deferring creation prevents QOpenGLWidget's
+        // first synchronous paint from racing the wallpaper cache.
+        QTimer::singleShot(0, canvas, [this, canvas] {
+            m_pending.remove(canvas);
+            if (canvas->isVisible())
+                ensureOverlay(canvas);
+        });
+    }
+
     DesktopCanvas *canvasForObject(QObject *object) const
     {
         QObject *current = object;
@@ -1003,7 +1220,6 @@ private:
         if (!canvas)
             return;
         if (auto *overlay = overlayFor(canvas)) {
-            overlay->show();
             overlay->syncToCanvas();
             return;
         }
@@ -1012,11 +1228,13 @@ private:
         m_overlays.insert(canvas, overlay);
         connect(canvas, &QObject::destroyed, this, [this, canvas] {
             m_overlays.remove(canvas);
+            m_pending.remove(canvas);
         });
         overlay->syncToCanvas();
     }
 
     QHash<DesktopCanvas *, QPointer<DesktopLensingOverlay>> m_overlays;
+    QSet<DesktopCanvas *> m_pending;
 };
 
 void installFenceLensingDemo()
@@ -1047,8 +1265,8 @@ void installFenceLensingDemo()
     fields.insert(QStringLiteral("velocity_norm_px_s"),
                   config.velocityNormPxS);
     fields.insert(QStringLiteral("response"), config.response);
-    fields.insert(QStringLiteral("center_transmission"),
-                  config.centerTransmission);
+    fields.insert(QStringLiteral("render_mode"),
+                  QStringLiteral("active_fence_edge_only"));
     fields.insert(QStringLiteral("specular_gain"), config.specularGain);
     fields.insert(QStringLiteral("gpu_timer_requested"), config.gpuTimer);
     writeGlassLog(QStringLiteral("demo_installed"), fields);

@@ -1076,7 +1076,8 @@ QRect FenceWidget::computeSnappedGeometry(const QRect &proposed) const
 QRect FenceWidget::applyWallpaperMagnet(const QRect &proposed)
 {
     auto *canvas = qobject_cast<DesktopCanvas *>(parentWidget());
-    if (!canvas || proposed.width() < 120 || proposed.height() < TITLE_H + 30) {
+    if (!canvas || !canvas->m_wallpaperMagnetEnabled ||
+        proposed.width() < 120 || proposed.height() < TITLE_H + 30) {
         m_magneticEdge = MagneticEdge::None;
         m_magneticContour.clear();
         clearMask();
