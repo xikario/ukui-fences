@@ -31,8 +31,11 @@ void applyNativeGlass(QMenu *menu)
     menu->ensurePolished();
     menu->adjustSize();
     const QRegion region = roundedMenuRegion(menu);
-    if (!region.isEmpty())
-        menu->setMask(region);
+    // Do not apply the rounded region as a QWidget mask. X11 masks are binary
+    // and turn an otherwise antialiased stylesheet corner into a visible
+    // staircase at 125%/150% scaling. The ARGB surface paints the smooth
+    // corner; the region is used only as the compositor blur hint.
+    menu->clearMask();
     const bool active = KWinBlur::request(menu, region);
     menu->setProperty("kwinBlurActive", active);
 }
@@ -51,11 +54,11 @@ QString venturaContextMenuStyleSheet()
             color: rgba(241,245,249,245);
             border: 1px solid rgba(255,255,255,58);
             border-radius: 12px;
-            padding: 5px;
+            padding: 4px;
         }
         QMenu::item {
             background-color: transparent;
-            padding: 5px 24px 5px 12px;
+            padding: 3px 24px 3px 12px;
             border: 1px solid transparent;
             border-radius: 6px;
             min-height: 17px;
@@ -71,7 +74,7 @@ QString venturaContextMenuStyleSheet()
         QMenu::separator {
             height: 1px;
             background-color: rgba(255,255,255,28);
-            margin: 4px 7px;
+            margin: 3px 7px;
         }
         QMenu::indicator {
             width: 14px;

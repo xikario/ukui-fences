@@ -18,6 +18,7 @@
 #include "StackBlur.h"
 
 class FenceWidget;
+class DesktopLensingOverlay;
 class DesktopIcon;
 class SystemMonitor;
 class SmartSpaceWidget;
@@ -38,6 +39,7 @@ class DesktopCanvas : public QWidget
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.ukui.fences")
     friend class FenceWidget;
+    friend class DesktopLensingOverlay;
 public:
     explicit DesktopCanvas(QWidget *parent = nullptr);
     ~DesktopCanvas();
@@ -94,6 +96,9 @@ public slots:
     Q_SCRIPTABLE void refreshAll();
     Q_SCRIPTABLE void activateOnSessionStartup();
     Q_SCRIPTABLE void quitApp();
+
+signals:
+    void wallpaperCacheChanged();
 
 protected:
     void paintEvent(QPaintEvent *)           override;
@@ -186,6 +191,7 @@ private:
                               const QPoint &clickPos);
     void createNewDesktopDirectory(const QPoint &clickPos);
     void showSettingsDialog();
+    void showFencesSettingsDialog();
     void showDesktopSyncSettingsDialog();
     void showGridDialog();
     void showWallpaperDialog();
@@ -287,6 +293,7 @@ private:
     int                 m_gridColumns = 18;
     int                 m_gridRows = 11;
     bool                m_autoArrange = false;
+    bool                m_wallpaperMagnetEnabled = true;
     ArrangeMode         m_arrangeMode = ArrangeMode::Manual;
     QString             m_desktopPath;
     QStringList         m_desktopPaths;

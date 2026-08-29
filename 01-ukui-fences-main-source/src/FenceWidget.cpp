@@ -55,6 +55,8 @@ namespace {
 
 constexpr const char *kInternalFileDragMime =
     "application/x-ukui-fences-file-drag";
+constexpr const char *kCollapseAnimatingProperty =
+    "ukuiFenceCollapseAnimating";
 
 QString normalizedStoredPath(const QString &path)
 {
@@ -172,7 +174,10 @@ FenceWidget::FenceWidget(const QString &title,
     m_iconViewport->setMouseTracking(true);
     m_iconViewport->installEventFilter(this);
     m_iconViewport->show();
-    m_expandedH = geo.height();
+    // Old layouts only persisted the current height. A collapsed Fence is
+    // therefore restored with h == TITLE_H; never treat that as its expanded
+    // height or clicking the title will appear to do nothing.
+    m_expandedH = geo.height() > TITLE_H ? geo.height() : 240;
 }
 
 // ── 属性设置 ─────────────────────────────────────────────
@@ -300,10 +305,28 @@ void FenceWidget::setEmbeddedWidget(QWidget *widget)
 void FenceWidget::setCollapsed(bool c)
 {
     if (m_collapsed == c) return;
+
+    // A second click during the opening animation must not replace the real
+    // expanded height with an in-between frame.
+    if (c && height() > TITLE_H && !m_collapseAnimation)
+        m_expandedH = height();
+
+    if (m_collapseAnimation) {
+        m_collapseAnimation->stop();
+        m_collapseAnimation->deleteLater();
+        m_collapseAnimation = nullptr;
+    }
+
+    // A magnetic contour is sampled for the fully-expanded rectangle.  It
+    // must not be intersected with every intermediate animation rectangle:
+    // doing so turns the Fence into a diagonal trapezoid.  The GL overlay
+    // also watches this flag and stays out of the QWidget resize sequence.
+    setProperty(kCollapseAnimatingProperty, true);
     m_collapsed = c;
 
     auto *anim = new QPropertyAnimation(this, "geometry", this);
-    anim->setDuration(160);
+    m_collapseAnimation = anim;
+    anim->setDuration(130);
     anim->setEasingCurve(QEasingCurve::OutCubic);
 
     if (m_collapsed) {
@@ -314,11 +337,21 @@ void FenceWidget::setCollapsed(bool c)
     } else {
         // 先展开，再显示图标
         anim->setEndValue(QRect(x(), y(), width(), m_expandedH));
-        connect(anim, &QPropertyAnimation::finished, [this] {
-            for (auto *ic : m_icons) ic->setVisible(true);
-            if (m_embeddedWidget) m_embeddedWidget->show();
-        });
     }
+    connect(anim, &QPropertyAnimation::finished, this, [this, anim] {
+        if (m_collapseAnimation != anim)
+            return;
+        m_collapseAnimation = nullptr;
+        setProperty(kCollapseAnimatingProperty, false);
+        updateShapeMask();
+        layoutIcons();
+        update();
+        emit geometryChanged();
+    });
+    connect(anim, &QObject::destroyed, this, [this, anim] {
+        if (m_collapseAnimation == anim)
+            m_collapseAnimation = nullptr;
+    });
     anim->start(QAbstractAnimation::DeleteWhenStopped);
     update();
 }
@@ -791,13 +824,15 @@ bool FenceWidget::iconBelongsToThisFence(DesktopIcon *icon) const
 
 void FenceWidget::layoutIcons()
 {
+    const bool showContent = !m_collapsed &&
+        !property(kCollapseAnimatingProperty).toBool();
     if (m_embeddedWidget) {
         m_iconViewport->hide();
         m_embeddedWidget->setGeometry(
             MARGIN, TITLE_H + 4,
             qMax(0, width() - MARGIN * 2),
             qMax(0, height() - TITLE_H - 4 - MARGIN));
-        m_embeddedWidget->setVisible(!m_collapsed);
+        m_embeddedWidget->setVisible(showContent);
         update();
         return;
     }
@@ -817,7 +852,7 @@ void FenceWidget::layoutIcons()
     const int viewportH = contentViewportHeight();
     if (m_iconViewport) {
         m_iconViewport->setGeometry(0, top, width(), viewportH);
-        m_iconViewport->setVisible(!m_collapsed && viewportH > 0);
+        m_iconViewport->setVisible(showContent && viewportH > 0);
     }
 
     const QRect visibleRect(0, 0, width(), viewportH);
@@ -829,7 +864,7 @@ void FenceWidget::layoutIcons()
             row * (iconH + ICON_GAP) - m_scrollOffset);
         m_icons[i]->move(pos);
         const QRect iconRect(pos, m_icons[i]->size());
-        m_icons[i]->setVisible(!m_collapsed &&
+        m_icons[i]->setVisible(showContent &&
                                visibleRect.intersects(iconRect));
     }
     update();
@@ -1076,7 +1111,8 @@ QRect FenceWidget::computeSnappedGeometry(const QRect &proposed) const
 QRect FenceWidget::applyWallpaperMagnet(const QRect &proposed)
 {
     auto *canvas = qobject_cast<DesktopCanvas *>(parentWidget());
-    if (!canvas || proposed.width() < 120 || proposed.height() < TITLE_H + 30) {
+    if (!canvas || !canvas->m_wallpaperMagnetEnabled ||
+        proposed.width() < 120 || proposed.height() < TITLE_H + 30) {
         m_magneticEdge = MagneticEdge::None;
         m_magneticContour.clear();
         clearMask();
@@ -1310,7 +1346,9 @@ void FenceWidget::refreshMagneticContour()
 QPainterPath FenceWidget::fenceShapePath() const
 {
     QPainterPath path;
-    if (m_magneticEdge == MagneticEdge::None ||
+    if (property(kCollapseAnimatingProperty).toBool() ||
+        m_collapsed ||
+        m_magneticEdge == MagneticEdge::None ||
         m_magneticContour.size() < 2) {
         path.addRoundedRect(QRectF(rect()), 10, 10);
         return path;
@@ -1354,7 +1392,9 @@ QPainterPath FenceWidget::fenceShapePath() const
 
 void FenceWidget::updateShapeMask()
 {
-    if (m_magneticEdge == MagneticEdge::None ||
+    if (property(kCollapseAnimatingProperty).toBool() ||
+        m_collapsed ||
+        m_magneticEdge == MagneticEdge::None ||
         m_magneticContour.size() < 2) {
         clearMask();
         return;
@@ -1364,7 +1404,9 @@ void FenceWidget::updateShapeMask()
 
 int FenceWidget::magneticContentInset() const
 {
-    if (m_magneticEdge != MagneticEdge::Left ||
+    if (property(kCollapseAnimatingProperty).toBool() ||
+        m_collapsed ||
+        m_magneticEdge != MagneticEdge::Left ||
         m_magneticContour.isEmpty())
         return MARGIN;
 
@@ -1431,8 +1473,9 @@ void FenceWidget::paintEvent(QPaintEvent *)
     GlassStyle::paintLayers(p, bgPath, r, glass, false);
 
     // 标题栏（略深，与主体平滑衔接）
-    QColor titleBg = glass.tint.darker(lightSurface ? 104 : 118);
-    titleBg.setAlpha(qMin(220, glass.tint.alpha() + 48));
+    // Keep the title readable without splitting glass into an opaque bar/body.
+    QColor titleBg = glass.tint.darker(lightSurface ? 102 : 108);
+    titleBg.setAlpha(qMin(200, glass.tint.alpha() + 20));
     QPainterPath titlePath;
     titlePath.addRoundedRect(QRectF(0, 0, width(), TITLE_H), 10, 10);
     QPainterPath cut;

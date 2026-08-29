@@ -64,6 +64,8 @@
 #include <QVBoxLayout>
 #include <QComboBox>
 #include <QSpinBox>
+#include <QListWidget>
+#include <QStackedWidget>
 #include <QDialogButtonBox>
 #include <QDialog>
 #include <QPushButton>
@@ -915,7 +917,22 @@ void DesktopCanvas::refreshAll()
     if (updatesWereEnabled)
         setUpdatesEnabled(true);
 
-    // 所有子控件与壁纸都就绪后，只提交最终帧。
+    // 所有子控件与壁纸都就绪后，同时点亮现有项目。
+    // 不再分批延迟，整个视觉反馈严格在 1 秒内结束。
+    auto pulseIcon = [](DesktopIcon *icon) {
+        if (!icon || !icon->isVisible())
+            return;
+        icon->playRefreshPulse();
+    };
+    for (DesktopIcon *icon : m_looseIcons)
+        pulseIcon(icon);
+    for (FenceWidget *fence : m_fences) {
+        if (!fence || fence->collapsed())
+            continue;
+        for (DesktopIcon *icon : fence->icons())
+            pulseIcon(icon);
+    }
+
     update();
 }
 
@@ -1399,6 +1416,8 @@ void DesktopCanvas::rebuildWallpaperCache()
     } else {
         m_blurredWallpaperCache = QPixmap();
     }
+
+    emit wallpaperCacheChanged();
 }
 
 bool DesktopCanvas::paintBlurredWallpaper(
@@ -1724,6 +1743,413 @@ void DesktopCanvas::clearFenceSelections()
         if (fence)
             fence->clearIconSelection();
     }
+}
+
+void DesktopCanvas::showFencesSettingsDialog()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle("Fences 设置");
+    dlg.setMinimumSize(640, 480);
+    dlg.resize(760, 520);
+
+    auto *root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(12, 12, 12, 10);
+    root->setSpacing(10);
+
+    auto *settingsBody = new QWidget(&dlg);
+    auto *settingsLayout = new QHBoxLayout(settingsBody);
+    settingsLayout->setContentsMargins(0, 0, 0, 0);
+    settingsLayout->setSpacing(14);
+
+    auto *navigation = new QListWidget(settingsBody);
+    navigation->setObjectName("fencesSettingsNavigation");
+    navigation->setFixedWidth(126);
+    navigation->setSpacing(2);
+    navigation->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    navigation->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    navigation->setStyleSheet(
+        "QListWidget#fencesSettingsNavigation {"
+        "  border: none; background: transparent; outline: none;"
+        "}"
+        "QListWidget#fencesSettingsNavigation::item {"
+        "  min-height: 34px; padding: 0 10px; border-radius: 7px;"
+        "}"
+        "QListWidget#fencesSettingsNavigation::item:selected {"
+        "  background: rgba(47, 128, 237, 32); color: palette(text);"
+        "}"
+        "QListWidget#fencesSettingsNavigation::item:hover:!selected {"
+        "  background: rgba(127, 127, 127, 18);"
+        "}");
+
+    auto *pages = new QStackedWidget(settingsBody);
+    settingsLayout->addWidget(navigation);
+    settingsLayout->addWidget(pages, 1);
+    root->addWidget(settingsBody, 1);
+
+    auto addSettingsPage = [navigation, pages](QWidget *page,
+                                                const QString &title) {
+        navigation->addItem(title);
+        pages->addWidget(page);
+    };
+
+    // ── 行为与布局 ──────────────────────────────────────────
+    auto *behaviorPage = new QWidget(pages);
+    auto *behavior = new QFormLayout(behaviorPage);
+
+    auto *editCheck = new QCheckBox("启用编辑模式（拖动/缩放分区）", behaviorPage);
+    editCheck->setChecked(m_editMode);
+    behavior->addRow("编辑：", editCheck);
+
+    auto *magnetCheck = new QCheckBox(
+        "让 Fence 边缘吸附壁纸明暗轮廓", behaviorPage);
+    magnetCheck->setChecked(m_wallpaperMagnetEnabled);
+    behavior->addRow("贴图边缘：", magnetCheck);
+
+    auto *arrangeCombo = new QComboBox(behaviorPage);
+    arrangeCombo->addItem("手动排列", static_cast<int>(ArrangeMode::Manual));
+    arrangeCombo->addItem("按名称自动排列", static_cast<int>(ArrangeMode::ByName));
+    arrangeCombo->addItem("按类型自动排列", static_cast<int>(ArrangeMode::ByType));
+    arrangeCombo->addItem("按修改时间自动排列",
+                          static_cast<int>(ArrangeMode::ByModifiedTime));
+    arrangeCombo->setCurrentIndex(qMax(0, arrangeCombo->findData(
+        static_cast<int>(m_arrangeMode))));
+    behavior->addRow("桌面图标：", arrangeCombo);
+
+    auto *columnsSpin = new QSpinBox(behaviorPage);
+    columnsSpin->setRange(4, 40);
+    columnsSpin->setValue(m_gridColumns);
+    behavior->addRow("桌面网格列数：", columnsSpin);
+
+    auto *rowsSpin = new QSpinBox(behaviorPage);
+    rowsSpin->setRange(3, 24);
+    rowsSpin->setValue(m_gridRows);
+    behavior->addRow("桌面网格行数：", rowsSpin);
+
+    auto *desktopScaleSpin = new QSpinBox(behaviorPage);
+    desktopScaleSpin->setRange(75, 175);
+    desktopScaleSpin->setSuffix("%");
+    desktopScaleSpin->setValue(qRound(m_desktopIconScale * 100));
+    behavior->addRow("桌面图标大小：", desktopScaleSpin);
+
+    auto *behaviorHint = new QLabel(
+        "贴图边缘关闭后，已有异形 Fence 会恢复标准圆角；重新打开时会按当前壁纸重新识别。",
+        behaviorPage);
+    behaviorHint->setWordWrap(true);
+    behaviorHint->setStyleSheet("color: #94a3b8;");
+    behavior->addRow("说明：", behaviorHint);
+    addSettingsPage(behaviorPage, "行为与布局");
+
+    // ── 玻璃与外观 ──────────────────────────────────────────
+    auto *appearancePage = new QWidget(pages);
+    auto *appearance = new QFormLayout(appearancePage);
+
+    auto *blurSpin = new QSpinBox(appearancePage);
+    blurSpin->setRange(0, 64);
+    blurSpin->setSuffix(" px");
+    blurSpin->setValue(m_glassBlurRadius);
+    appearance->addRow("静态毛玻璃半径：", blurSpin);
+
+    auto *opacitySpin = new QSpinBox(appearancePage);
+    opacitySpin->setRange(30, 200);
+    opacitySpin->setValue(m_defaultFenceColor.alpha());
+    appearance->addRow("默认分区透明度：", opacitySpin);
+
+    auto *applyOpacityCheck = new QCheckBox(
+        "同时应用到现有全部 Fence", appearancePage);
+    appearance->addRow("透明度范围：", applyOpacityCheck);
+
+    auto *themeCombo = new QComboBox(appearancePage);
+    themeCombo->addItem("保持当前颜色", QStringLiteral("keep"));
+    themeCombo->addItem("从当前壁纸取色", QStringLiteral("wallpaper"));
+    themeCombo->addItem("海湾蓝", QStringLiteral("#2f80ed"));
+    themeCombo->addItem("樱花粉", QStringLiteral("#ff7aa2"));
+    themeCombo->addItem("松石绿", QStringLiteral("#14b8a6"));
+    themeCombo->addItem("暮色紫", QStringLiteral("#8b5cf6"));
+    themeCombo->addItem("石墨灰", QStringLiteral("#202124"));
+    appearance->addRow("全局主题：", themeCombo);
+
+    auto *appearanceButtons = new QWidget(appearancePage);
+    auto *appearanceButtonsLayout = new QHBoxLayout(appearanceButtons);
+    appearanceButtonsLayout->setContentsMargins(0, 0, 0, 0);
+    auto *fontSettingsButton = new QPushButton("桌面字体…", appearanceButtons);
+    auto *wallpaperButton = new QPushButton("Fences 壁纸…", appearanceButtons);
+    auto *externalThemeButton = new QPushButton("外部主题…", appearanceButtons);
+    appearanceButtonsLayout->addWidget(fontSettingsButton);
+    appearanceButtonsLayout->addWidget(wallpaperButton);
+    appearanceButtonsLayout->addWidget(externalThemeButton);
+    appearanceButtonsLayout->addStretch();
+    appearance->addRow("详细设置：", appearanceButtons);
+    connect(fontSettingsButton, &QPushButton::clicked,
+            this, &DesktopCanvas::showSettingsDialog);
+    connect(wallpaperButton, &QPushButton::clicked,
+            this, &DesktopCanvas::showWallpaperDialog);
+    connect(externalThemeButton, &QPushButton::clicked, &dlg, [this] {
+        if (loadExternalTheme()) {
+            applyExternalThemeToFences();
+            return;
+        }
+        QMessageBox::warning(
+            this, "外部主题",
+            "没有找到可用的外部主题文件。\n\n"
+            "该入口面向 Matugen、Quickshell 和 Waybar 主题。");
+    });
+    addSettingsPage(appearancePage, "玻璃与外观");
+
+    // ── 单个分区 ────────────────────────────────────────────
+    auto *fencePage = new QWidget(pages);
+    auto *fenceForm = new QFormLayout(fencePage);
+    auto *fenceCombo = new QComboBox(fencePage);
+    for (FenceWidget *fence : m_fences) {
+        if (fence)
+            fenceCombo->addItem(fence->title(), fence->fenceId());
+    }
+    fenceForm->addRow("选择分区：", fenceCombo);
+
+    auto *fenceTitleEdit = new QLineEdit(fencePage);
+    fenceForm->addRow("标题：", fenceTitleEdit);
+    auto *fenceLockCheck = new QCheckBox("锁定位置和尺寸", fencePage);
+    fenceForm->addRow("锁定：", fenceLockCheck);
+    auto *fenceCollapsedCheck = new QCheckBox("折叠为标题栏", fencePage);
+    fenceForm->addRow("折叠：", fenceCollapsedCheck);
+    auto *fenceOpacitySpin = new QSpinBox(fencePage);
+    fenceOpacitySpin->setRange(30, 220);
+    fenceForm->addRow("透明度：", fenceOpacitySpin);
+
+    QColor selectedFenceColor;
+    auto *fenceColorButton = new QPushButton(fencePage);
+    auto updateFenceColorButton = [&] {
+        QPixmap swatch(48, 16);
+        swatch.fill(selectedFenceColor);
+        fenceColorButton->setIcon(QIcon(swatch));
+        fenceColorButton->setText(selectedFenceColor.name());
+    };
+    fenceForm->addRow("颜色：", fenceColorButton);
+
+    auto selectedFence = [this, fenceCombo]() -> FenceWidget * {
+        return fenceById(fenceCombo->currentData().toString());
+    };
+    auto loadFence = [&] {
+        FenceWidget *fence = selectedFence();
+        const bool available = fence != nullptr;
+        fenceTitleEdit->setEnabled(available);
+        fenceLockCheck->setEnabled(available);
+        fenceCollapsedCheck->setEnabled(available);
+        fenceOpacitySpin->setEnabled(available);
+        fenceColorButton->setEnabled(available);
+        if (!fence)
+            return;
+        fenceTitleEdit->setText(fence->title());
+        fenceLockCheck->setChecked(fence->locked());
+        fenceCollapsedCheck->setChecked(fence->collapsed());
+        selectedFenceColor = fence->fenceColor();
+        fenceOpacitySpin->setValue(selectedFenceColor.alpha());
+        updateFenceColorButton();
+    };
+    connect(fenceCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            &dlg, [=, &loadFence](int) { loadFence(); });
+    connect(fenceColorButton, &QPushButton::clicked, &dlg, [&] {
+        QColor color = QColorDialog::getColor(
+            selectedFenceColor, &dlg, "选择分区颜色");
+        if (!color.isValid())
+            return;
+        selectedFenceColor = color;
+        selectedFenceColor.setAlpha(fenceOpacitySpin->value());
+        updateFenceColorButton();
+    });
+
+    auto *fenceDetailButtons = new QWidget(fencePage);
+    auto *fenceDetailLayout = new QHBoxLayout(fenceDetailButtons);
+    fenceDetailLayout->setContentsMargins(0, 0, 0, 0);
+    auto *titleFontButton = new QPushButton("标题字体…", fenceDetailButtons);
+    auto *iconFontButton = new QPushButton("内部图标字体…", fenceDetailButtons);
+    fenceDetailLayout->addWidget(titleFontButton);
+    fenceDetailLayout->addWidget(iconFontButton);
+    fenceDetailLayout->addStretch();
+    fenceForm->addRow("字体：", fenceDetailButtons);
+    connect(titleFontButton, &QPushButton::clicked, &dlg, [=] {
+        if (FenceWidget *fence = selectedFence())
+            fence->showTitleFontSettingsDialog();
+    });
+    connect(iconFontButton, &QPushButton::clicked, &dlg, [=] {
+        if (FenceWidget *fence = selectedFence())
+            fence->showFontSettingsDialog();
+    });
+
+    auto *applyFenceButton = new QPushButton("应用到所选分区", fencePage);
+    fenceForm->addRow(QString(), applyFenceButton);
+    connect(applyFenceButton, &QPushButton::clicked, &dlg, [&] {
+        FenceWidget *fence = selectedFence();
+        if (!fence)
+            return;
+        fence->setTitle(fenceTitleEdit->text().trimmed().isEmpty()
+            ? fence->title() : fenceTitleEdit->text().trimmed());
+        fence->setLocked(fenceLockCheck->isChecked());
+        fence->setCollapsed(fenceCollapsedCheck->isChecked());
+        selectedFenceColor.setAlpha(fenceOpacitySpin->value());
+        fence->setFenceColor(selectedFenceColor);
+        saveLayout();
+        const QSignalBlocker blocker(fenceCombo);
+        fenceCombo->setItemText(fenceCombo->currentIndex(), fence->title());
+    });
+    loadFence();
+    addSettingsPage(fencePage, "单个分区");
+
+    // ── 组件与同步 ──────────────────────────────────────────
+    auto *componentsPage = new QWidget(pages);
+    auto *components = new QFormLayout(componentsPage);
+    auto *monitorVisibleCheck = new QCheckBox("显示系统监控", componentsPage);
+    monitorVisibleCheck->setChecked(m_monitor != nullptr);
+    components->addRow("系统监控：", monitorVisibleCheck);
+    auto *monitorStartupCheck = new QCheckBox("登录后自动显示", componentsPage);
+    monitorStartupCheck->setChecked(SystemMonitor::autoStartEnabled());
+    components->addRow("系统监控启动：", monitorStartupCheck);
+
+    auto *smartVisibleCheck = new QCheckBox("显示智能空间", componentsPage);
+    smartVisibleCheck->setChecked(m_smartSpace != nullptr);
+    components->addRow("智能空间：", smartVisibleCheck);
+    auto *smartStartupCheck = new QCheckBox("登录后自动显示", componentsPage);
+    smartStartupCheck->setChecked(SmartSpaceWidget::autoStartEnabled());
+    components->addRow("智能空间启动：", smartStartupCheck);
+    auto *smartTopCheck = new QCheckBox("智能空间保持置顶", componentsPage);
+    smartTopCheck->setChecked(smartSpaceAlwaysOnTop());
+    components->addRow("智能空间层级：", smartTopCheck);
+
+    auto *inboxCombo = new QComboBox(componentsPage);
+    inboxCombo->addItem("无（新增文件留在桌面）", QString());
+    for (FenceWidget *fence : m_fences) {
+        if (fence)
+            inboxCombo->addItem(fence->title(), fence->fenceId());
+    }
+    const int inboxIndex = inboxCombo->findData(m_desktopInboxFenceId);
+    if (inboxIndex >= 0)
+        inboxCombo->setCurrentIndex(inboxIndex);
+    components->addRow("新增桌面文件放入：", inboxCombo);
+
+    auto *syncSettingsButton = new QPushButton(
+        "桌面文件同步详细设置…", componentsPage);
+    components->addRow("同步设置：", syncSettingsButton);
+    connect(syncSettingsButton, &QPushButton::clicked,
+            this, &DesktopCanvas::showDesktopSyncSettingsDialog);
+    addSettingsPage(componentsPage, "组件与同步");
+
+    // ── 维护 ────────────────────────────────────────────────
+    auto *maintenancePage = new QWidget(pages);
+    auto *maintenanceRoot = new QVBoxLayout(maintenancePage);
+    auto *refreshButton = new QPushButton("立即刷新桌面和壁纸缓存", maintenancePage);
+    auto *exportButton = new QPushButton("导出布局备份…", maintenancePage);
+    auto *importButton = new QPushButton("导入布局备份…", maintenancePage);
+    maintenanceRoot->addWidget(refreshButton);
+    maintenanceRoot->addWidget(exportButton);
+    maintenanceRoot->addWidget(importButton);
+    maintenanceRoot->addStretch();
+    auto *maintenanceHint = new QLabel(
+        "新建分区、编辑模式等高频操作仍保留在桌面右键菜单；配置、外观、组件和布局管理集中在这里。",
+        maintenancePage);
+    maintenanceHint->setWordWrap(true);
+    maintenanceHint->setStyleSheet("color: #94a3b8;");
+    maintenanceRoot->addWidget(maintenanceHint);
+    connect(refreshButton, &QPushButton::clicked,
+            this, &DesktopCanvas::refreshAll);
+    connect(exportButton, &QPushButton::clicked,
+            this, &DesktopCanvas::exportLayout);
+    connect(importButton, &QPushButton::clicked,
+            this, &DesktopCanvas::importLayout);
+    addSettingsPage(maintenancePage, "维护");
+
+    connect(navigation, &QListWidget::currentRowChanged,
+            pages, &QStackedWidget::setCurrentIndex);
+    navigation->setCurrentRow(0);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    root->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    setGlobalEditMode(editCheck->isChecked());
+
+    const bool magnetChanged =
+        m_wallpaperMagnetEnabled != magnetCheck->isChecked();
+    m_wallpaperMagnetEnabled = magnetCheck->isChecked();
+    if (magnetChanged) {
+        for (FenceWidget *fence : m_fences) {
+            if (!fence)
+                continue;
+            if (m_wallpaperMagnetEnabled) {
+                fence->refreshMagneticContour();
+            } else {
+                fence->m_magneticEdge =
+                    static_cast<FenceWidget::MagneticEdge>(0);
+                fence->m_magneticContour.clear();
+                fence->updateShapeMask();
+                fence->layoutIcons();
+                fence->update();
+            }
+        }
+    }
+
+    m_arrangeMode = static_cast<ArrangeMode>(arrangeCombo->currentData().toInt());
+    m_autoArrange = m_arrangeMode != ArrangeMode::Manual;
+    applyDesktopGrid(columnsSpin->value(), rowsSpin->value(),
+                     desktopScaleSpin->value() / 100.0);
+    layoutLooseIcons();
+
+    setGlassBlurRadius(blurSpin->value());
+    m_defaultFenceColor.setAlpha(opacitySpin->value());
+
+    const QString theme = themeCombo->currentData().toString();
+    if (theme == QLatin1String("wallpaper")) {
+        applyWallpaperThemeToFences();
+    } else if (theme.startsWith(QLatin1Char('#'))) {
+        QColor color(theme);
+        color.setAlpha(opacitySpin->value());
+        const QColor text = theme == QLatin1String("#ff7aa2")
+            ? QColor("#202124") : QColor(Qt::white);
+        applyThemeToFences(color, text);
+    }
+    if (applyOpacityCheck->isChecked()) {
+        for (FenceWidget *fence : m_fences) {
+            if (!fence)
+                continue;
+            QColor color = fence->fenceColor();
+            color.setAlpha(opacitySpin->value());
+            fence->setFenceColor(color);
+        }
+    }
+
+    setSystemMonitorVisible(monitorVisibleCheck->isChecked());
+    setSmartSpaceVisible(smartVisibleCheck->isChecked());
+    if (m_monitor) {
+        m_monitor->setAutoStart(monitorStartupCheck->isChecked());
+    } else {
+        QSettings settings;
+        settings.beginGroup(QStringLiteral("systemMonitor"));
+        settings.setValue(QStringLiteral("autoStart"),
+                          monitorStartupCheck->isChecked());
+        settings.endGroup();
+    }
+    if (m_smartSpace) {
+        m_smartSpace->setAutoStart(smartStartupCheck->isChecked());
+        applySmartSpaceWindowMode(smartTopCheck->isChecked());
+    } else {
+        QSettings settings;
+        settings.beginGroup(QStringLiteral("smartSpace"));
+        settings.setValue(QStringLiteral("autoStart"),
+                          smartStartupCheck->isChecked());
+        settings.setValue(QStringLiteral("alwaysOnTop"),
+                          smartTopCheck->isChecked());
+        settings.endGroup();
+    }
+
+    const QString newInboxId = inboxCombo->currentData().toString();
+    const bool inboxChanged = m_desktopInboxFenceId != newInboxId;
+    m_desktopInboxFenceId = newInboxId;
+    saveLayout();
+    if (inboxChanged)
+        forceSyncDesktopIcons();
 }
 
 void DesktopCanvas::showSettingsDialog()
@@ -4928,6 +5354,13 @@ void DesktopCanvas::contextMenuEvent(QContextMenuEvent *e)
     connect(actRefresh, &QAction::triggered,
             this, &DesktopCanvas::refreshAll);
 
+    auto *actUnifiedSettings = menu.addAction(
+        menuIcon(QStringList() << "preferences-system" << "ukui-fences",
+                 "⚙", QColor("#7c3aed")),
+        "Fences 设置…");
+    connect(actUnifiedSettings, &QAction::triggered,
+            [this] { showFencesSettingsDialog(); });
+
     menu.addSeparator();
 
     // 新建分区（在点击位置创建）
@@ -4951,179 +5384,6 @@ void DesktopCanvas::contextMenuEvent(QContextMenuEvent *e)
         "智能取样创建分区（拖拽壁纸区域）");
     connect(actWallpaperCapture, &QAction::triggered,
             [this] { beginWallpaperFenceCapture(); });
-
-    auto *actDesktopGrid = menu.addAction(
-        menuIcon(QStringList() << "view-grid" << "view-grid-symbolic",
-                 "▦", QColor("#0891b2")),
-        "桌面图标 X×Y 网格…");
-    connect(actDesktopGrid, &QAction::triggered,
-            [this] { showGridDialog(); });
-
-    auto *actDesklet = menu.addAction(
-        menuIcon(QStringList() << "utilities-system-monitor" << "system-run",
-                 "CPU", QColor("#dc2626")),
-        "系统监控小组件");
-    actDesklet->setCheckable(true);
-    actDesklet->setChecked(m_monitor != nullptr);
-    connect(actDesklet, &QAction::triggered,
-            [this](bool visible) { setSystemMonitorVisible(visible); });
-
-    auto *actSmartSpace = menu.addAction(
-        menuIcon(QStringList() << "folder-saved-search" << "system-search",
-                 "✦", QColor("#6366f1")),
-        "智能空间小组件");
-    actSmartSpace->setCheckable(true);
-    actSmartSpace->setChecked(m_smartSpace != nullptr);
-    connect(actSmartSpace, &QAction::triggered,
-            [this](bool visible) { setSmartSpaceVisible(visible); });
-
-    QMenu *widgetStartupMenu = menu.addMenu(
-        menuIcon(QStringList() << "preferences-system-session-services" << "system-run",
-                 "⏱", QColor("#f59e0b")),
-        "小组件开机自启动");
-    MenuStyle::applyVenturaContextMenu(widgetStartupMenu);
-    auto startupLabel = [](const QString &name, bool on) {
-        return QStringLiteral("%1 %2").arg(on ? QStringLiteral("✔") : QStringLiteral("⭕"), name);
-    };
-    // --- 系统监控 ---
-    const bool monitorOn = SystemMonitor::autoStartEnabled();
-    auto *monitorStartup = widgetStartupMenu->addAction(
-        QIcon::fromTheme(QStringLiteral("utilities-system-monitor")),
-        startupLabel(QStringLiteral("系统监控"), monitorOn));
-    // 不设 setCheckable —— 用文字 ✔/⭕ 表示状态，避免 Qt 自带勾号造成双重标识混淆
-    connect(monitorStartup, &QAction::triggered, this,
-            [this, monitorStartup, startupLabel] {
-        const bool enabled = !SystemMonitor::autoStartEnabled();
-        monitorStartup->setText(startupLabel(QStringLiteral("系统监控"), enabled));
-        if (m_monitor) {
-            m_monitor->setAutoStart(enabled);
-            return;
-        }
-        QSettings settings;
-        settings.beginGroup(QStringLiteral("systemMonitor"));
-        settings.setValue(QStringLiteral("autoStart"), enabled);
-        settings.endGroup();
-        settings.sync();
-    });
-    // --- 智能空间 ---
-    const bool smartOn = SmartSpaceWidget::autoStartEnabled();
-    auto *smartStartup = widgetStartupMenu->addAction(
-        QIcon::fromTheme(QStringLiteral("folder-saved-search")),
-        startupLabel(QStringLiteral("智能空间"), smartOn));
-    connect(smartStartup, &QAction::triggered, this,
-            [this, smartStartup, startupLabel] {
-        const bool enabled = !SmartSpaceWidget::autoStartEnabled();
-        smartStartup->setText(startupLabel(QStringLiteral("智能空间"), enabled));
-        if (m_smartSpace) {
-            m_smartSpace->setAutoStart(enabled);
-            return;
-        }
-        QSettings settings;
-        settings.beginGroup(QStringLiteral("smartSpace"));
-        settings.setValue(QStringLiteral("autoStart"), enabled);
-        settings.endGroup();
-        settings.sync();
-    });
-
-    menu.addSeparator();
-
-    QMenu *themeMenu = menu.addMenu(
-        menuIcon(QStringList() << "preferences-desktop-theme" << "applications-graphics",
-                 "🎨", QColor("#9333ea")),
-        "主题颜色");
-    MenuStyle::applyVenturaContextMenu(themeMenu);
-
-    auto *actWallpaperTheme = themeMenu->addAction(
-        menuIcon(QStringList() << "color-picker" << "preferences-color",
-                 "◎", QColor("#7c3aed")),
-        "从当前壁纸取色");
-    connect(actWallpaperTheme, &QAction::triggered, [this] {
-        if (!applyWallpaperThemeToFences()) {
-            QMessageBox::warning(this, "主题颜色",
-                "当前壁纸没有可提取的明显颜色。");
-        }
-    });
-
-    themeMenu->addSeparator();
-
-    auto addPreset = [this, themeMenu](const QString &name,
-                                       const QColor &accent,
-                                       const QColor &text = QColor(Qt::white)) {
-        auto *act = themeMenu->addAction(colorSwatchMenuIcon(accent), name);
-        connect(act, &QAction::triggered, [this, accent, text] {
-            QColor c = accent;
-            c.setAlpha(90);
-            applyThemeToFences(c, text);
-        });
-    };
-    addPreset("海湾蓝", QColor("#2f80ed"));
-    addPreset("樱花粉", QColor("#ff7aa2"), QColor("#202124"));
-    addPreset("松石绿", QColor("#14b8a6"));
-    addPreset("暮色紫", QColor("#8b5cf6"));
-    addPreset("石墨灰", QColor("#202124"));
-
-    themeMenu->addSeparator();
-
-    auto *actApplyExternalTheme = themeMenu->addAction(
-        menuIcon(QStringList() << "document-open" << "folder-open",
-                 "CSS", QColor("#475569")),
-        "应用外部主题文件");
-    connect(actApplyExternalTheme, &QAction::triggered, [this] {
-        if (!loadExternalTheme()) {
-            QMessageBox::warning(this, "主题颜色",
-                "没有找到外部主题文件。\n\n"
-                "这是给 Matugen/Quickshell/Waybar 用户用的高级入口。\n"
-                "普通使用可以直接点“从当前壁纸取色”或选择内置配色。");
-            return;
-        }
-
-        applyExternalThemeToFences();
-    });
-
-    auto *actAutoArrange = menu.addAction(
-        fallbackMenuIcon(m_autoArrange ? "✔" : "⭕",
-                         m_autoArrange ? QColor("#16a34a")
-                                       : QColor("#64748b")),
-        "自动排列图标");
-    connect(actAutoArrange, &QAction::triggered, [this] {
-        m_autoArrange = !m_autoArrange;
-        if (m_autoArrange && m_arrangeMode == ArrangeMode::Manual)
-            m_arrangeMode = ArrangeMode::ByName;
-        layoutLooseIcons();
-        saveLayout();
-    });
-
-    QMenu *sortModeMenu = menu.addMenu(
-        menuIcon(QStringList() << "view-sort-ascending" << "sort-name",
-                 "⇅", QColor("#475569")),
-        "排序方式");
-    MenuStyle::applyVenturaContextMenu(sortModeMenu);
-    auto addArrangeMode = [&](const QString &name,
-                              ArrangeMode mode,
-                              const QIcon &icon) {
-        auto *act = sortModeMenu->addAction(
-            icon, name);
-        act->setCheckable(true);
-        act->setChecked(m_arrangeMode == mode);
-        connect(act, &QAction::triggered, [this, mode] {
-            m_arrangeMode = mode;
-            if (mode == ArrangeMode::Manual)
-                m_autoArrange = false;
-            else
-                m_autoArrange = true;
-            layoutLooseIcons();
-            saveLayout();
-        });
-    };
-    addArrangeMode("手动排列", ArrangeMode::Manual,
-                   menuIcon(QStringList() << "input-mouse", "✋", QColor("#475569")));
-    addArrangeMode("按名称排列", ArrangeMode::ByName,
-                   menuIcon(QStringList() << "view-sort-ascending", "A↓", QColor("#2563eb")));
-    addArrangeMode("按类型排列", ArrangeMode::ByType,
-                   menuIcon(QStringList() << "folder-documents", "T", QColor("#16a34a")));
-    addArrangeMode("按修改时间排列", ArrangeMode::ByModifiedTime,
-                   menuIcon(QStringList() << "view-calendar" << "appointment-new",
-                            "⌚", QColor("#ea580c")));
 
     menu.addSeparator();
 
@@ -5210,40 +5470,13 @@ void DesktopCanvas::contextMenuEvent(QContextMenuEvent *e)
             QStringLiteral("xdg-open"), QStringList() << home);
     });
 
-    QMenu *desktopSettingsMenu = menu.addMenu(
+    auto *actWallpaper = menu.addAction(
         menuIcon(QStringList() << "preferences-desktop" << "preferences-system",
                  "⚙", QColor("#7c3aed")),
-        "桌面设置");
-    MenuStyle::applyVenturaContextMenu(desktopSettingsMenu);
-
-    auto *actSettings = desktopSettingsMenu->addAction(
-        menuIcon(QStringList() << "preferences-desktop-font" << "preferences-other",
-                 "Aa", QColor("#2563eb")),
-        "桌面字体设置…");
-    connect(actSettings, &QAction::triggered,
-            [this] { showSettingsDialog(); });
-
-    auto *actDesktopSync = desktopSettingsMenu->addAction(
-        menuIcon(QStringList() << "folder-sync" << "folder-saved-search",
-                 "↔", QColor("#0ea5e9")),
-        "桌面文件同步设置…");
-    connect(actDesktopSync, &QAction::triggered,
-            [this] { showDesktopSyncSettingsDialog(); });
-
-    auto *actWallpaper = desktopSettingsMenu->addAction(
-        menuIcon(QStringList() << "preferences-desktop-wallpaper" << "image-x-generic",
-                 "🖼", QColor("#16a34a")),
-        "更改壁纸");
+        "系统壁纸设置…");
     connect(actWallpaper, &QAction::triggered, [] {
         openWallpaperSettings();
     });
-
-    auto *actFencesWallpaper = desktopSettingsMenu->addAction(
-        menuIcon(QStringList() << "preferences-desktop-wallpaper" << "image-x-generic",
-                 "▧", QColor("#0891b2")),
-        "Fences 壁纸…");
-    connect(actFencesWallpaper, &QAction::triggered,
-            [this] { showWallpaperDialog(); });
 
     menu.addSeparator();
 
@@ -5398,6 +5631,7 @@ void DesktopCanvas::saveLayout()
         obj["y"]         = fence->y();
         obj["w"]         = fence->width();
         obj["h"]         = fence->height();
+        obj["expandedH"] = fence->m_expandedH;
         obj["color"]     = fence->fenceColor().name(QColor::HexArgb);
         obj["collapsed"] = fence->collapsed();
         obj["locked"]    = fence->locked();
@@ -5462,6 +5696,10 @@ void DesktopCanvas::saveLayout()
     root["gridRows"] = m_gridRows;
     root["autoArrange"] = m_autoArrange;
     root["arrangeMode"] = static_cast<int>(m_arrangeMode);
+    root["wallpaperMagnetEnabled"] = m_wallpaperMagnetEnabled;
+    root["glassBlurRadius"] = m_glassBlurRadius;
+    root["defaultFenceColor"] =
+        m_defaultFenceColor.name(QColor::HexArgb);
     root["desktopInboxFenceId"] = m_desktopInboxFenceId;
     root["wallpaperPath"] = m_wallpaperPath;
     root["wallpaperMode"] = static_cast<int>(m_wallpaperMode);
@@ -5508,6 +5746,15 @@ void DesktopCanvas::loadLayout()
     m_gridColumns = qBound(4, root["gridColumns"].toInt(18), 40);
     m_gridRows = qBound(3, root["gridRows"].toInt(11), 24);
     m_autoArrange = root["autoArrange"].toBool(false);
+    m_wallpaperMagnetEnabled =
+        root["wallpaperMagnetEnabled"].toBool(true);
+    m_glassBlurRadius = qBound(
+        0, root["glassBlurRadius"].toInt(28), 64);
+    QColor savedDefaultFenceColor;
+    savedDefaultFenceColor.setNamedColor(
+        root["defaultFenceColor"].toString("#5a0078d7"));
+    if (savedDefaultFenceColor.isValid())
+        m_defaultFenceColor = savedDefaultFenceColor;
     const bool hasInboxSetting = root.contains("desktopInboxFenceId");
     m_desktopInboxFenceId = root["desktopInboxFenceId"].toString().trimmed();
     const int mode = root["arrangeMode"].toInt(0);
@@ -5557,8 +5804,26 @@ void DesktopCanvas::loadLayout()
 
     for (const QJsonValue &v : root["fences"].toArray()) {
         const QJsonObject obj = v.toObject();
+        const bool collapsed = obj["collapsed"].toBool();
+        const int storedHeight = obj["h"].toInt(280);
+        const bool lostExpandedGeometry =
+            storedHeight <= FenceWidget::TITLE_H;
+        // V0.5.0 and earlier saved only the collapsed 34px geometry. Recover
+        // those layouts with a usable default. Some old sessions had already
+        // toggled collapsed=false while remaining 34px tall, so height (rather
+        // than the flag alone) is the compatibility signal.
+        const int persistedExpandedHeight = obj["expandedH"].toInt(0);
+        const int expandedHeight = qMax(
+            FenceWidget::TITLE_H + 20,
+            lostExpandedGeometry &&
+                    persistedExpandedHeight <= FenceWidget::TITLE_H + 20
+                ? 240
+                : (persistedExpandedHeight > 0
+                    ? persistedExpandedHeight : storedHeight));
         const QRect geo(obj["x"].toInt(100), obj["y"].toInt(100),
-                        obj["w"].toInt(380), obj["h"].toInt(280));
+                        obj["w"].toInt(380),
+                        collapsed || lostExpandedGeometry
+                            ? expandedHeight : storedHeight);
 
         QString title = obj["title"].toString("分区");
         const QStringList oldEmojiPrefixes = {
@@ -5573,6 +5838,7 @@ void DesktopCanvas::loadLayout()
             }
         }
         auto *fence = createFence(title, geo);
+        fence->m_expandedH = expandedHeight;
         const QString storedId = obj["id"].toString().trimmed();
         if (!storedId.isEmpty())
             fence->m_id = storedId;
@@ -5588,7 +5854,7 @@ void DesktopCanvas::loadLayout()
                 fence->addItem(item);
         }
 
-        if (obj["collapsed"].toBool())
+        if (collapsed)
             fence->setCollapsed(true);
 
         if (obj["locked"].toBool())

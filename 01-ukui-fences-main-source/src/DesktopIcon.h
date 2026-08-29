@@ -5,6 +5,7 @@
 #include <QRect>
 #include <QColor>
 #include <QFont>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QUrl>
 #include <QList>
@@ -27,6 +28,7 @@ public:
     void setCut(bool cut);
     bool isCut() const { return m_cut; }
     void setVisualScale(qreal scale);
+    void playRefreshPulse(int delayMs = 0);
 
     // 字体配置
     void setFontFamily(const QString &family);
@@ -100,6 +102,10 @@ private:
     bool        m_clickAnim = false;
     qreal       m_clickAnimProgress = 0.0;
     QTimer      m_clickAnimTimer;
+    bool        m_refreshPulse = false;
+    qreal       m_refreshPulseProgress = 0.0;
+    QElapsedTimer m_refreshPulseClock;
+    QTimer      m_refreshPulseTimer;
     QTimer      m_renameTimer;
     QLineEdit  *m_renameEdit = nullptr;
     bool        m_finishingRename = false;
