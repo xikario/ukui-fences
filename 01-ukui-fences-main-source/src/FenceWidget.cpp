@@ -172,7 +172,10 @@ FenceWidget::FenceWidget(const QString &title,
     m_iconViewport->setMouseTracking(true);
     m_iconViewport->installEventFilter(this);
     m_iconViewport->show();
-    m_expandedH = geo.height();
+    // Old layouts only persisted the current height. A collapsed Fence is
+    // therefore restored with h == TITLE_H; never treat that as its expanded
+    // height or clicking the title will appear to do nothing.
+    m_expandedH = geo.height() > TITLE_H ? geo.height() : 240;
 }
 
 // ── 属性设置 ─────────────────────────────────────────────
@@ -300,9 +303,22 @@ void FenceWidget::setEmbeddedWidget(QWidget *widget)
 void FenceWidget::setCollapsed(bool c)
 {
     if (m_collapsed == c) return;
+
+    // A second click during the opening animation must not replace the real
+    // expanded height with an in-between frame.
+    if (c && height() > TITLE_H && !m_collapseAnimation)
+        m_expandedH = height();
+
+    if (m_collapseAnimation) {
+        m_collapseAnimation->stop();
+        m_collapseAnimation->deleteLater();
+        m_collapseAnimation = nullptr;
+    }
+
     m_collapsed = c;
 
     auto *anim = new QPropertyAnimation(this, "geometry", this);
+    m_collapseAnimation = anim;
     anim->setDuration(160);
     anim->setEasingCurve(QEasingCurve::OutCubic);
 
@@ -314,11 +330,22 @@ void FenceWidget::setCollapsed(bool c)
     } else {
         // 先展开，再显示图标
         anim->setEndValue(QRect(x(), y(), width(), m_expandedH));
-        connect(anim, &QPropertyAnimation::finished, [this] {
-            for (auto *ic : m_icons) ic->setVisible(true);
-            if (m_embeddedWidget) m_embeddedWidget->show();
+        connect(anim, &QPropertyAnimation::finished, this, [this] {
+            if (!m_collapsed) {
+                for (auto *ic : m_icons) ic->setVisible(true);
+                if (m_embeddedWidget) m_embeddedWidget->show();
+            }
         });
     }
+    connect(anim, &QPropertyAnimation::finished, this, [this, anim] {
+        if (m_collapseAnimation == anim)
+            m_collapseAnimation = nullptr;
+        emit geometryChanged();
+    });
+    connect(anim, &QObject::destroyed, this, [this, anim] {
+        if (m_collapseAnimation == anim)
+            m_collapseAnimation = nullptr;
+    });
     anim->start(QAbstractAnimation::DeleteWhenStopped);
     update();
 }

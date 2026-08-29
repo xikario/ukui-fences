@@ -124,8 +124,6 @@ int main(int argc, char *argv[])
     app.setApplicationVersion("0.5.0");
     app.setDesktopFileName("ukui-fences");
 
-    app.setStyleSheet(MenuStyle::venturaContextMenuStyleSheet());
-
     const QIcon icon = appIcon();
     app.setWindowIcon(icon);
 

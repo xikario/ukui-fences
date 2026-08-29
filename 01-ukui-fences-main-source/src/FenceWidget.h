@@ -16,6 +16,7 @@ class DesktopIcon;
 class QKeyEvent;
 class QWheelEvent;
 class QDragLeaveEvent;
+class QPropertyAnimation;
 
 class FenceWidget : public QWidget
 {
@@ -160,6 +161,7 @@ private:
     bool     m_collapsed = false;
     bool     m_locked    = false;
     int      m_expandedH = 240;
+    QPropertyAnimation *m_collapseAnimation = nullptr;
     qreal    m_iconScale = 1.0;
     int      m_scrollOffset = 0;
     int      m_contentHeight = 0;

@@ -11,7 +11,8 @@ V3 保留现有 StackBlur、GlassStyle 和 KWin Blur 作为所有 Fence 的稳�
 - Shader 只输出 Fence 外缘的 0–8 px 强折射 rim 和 8–28 px shoulder，中央始终为透明，不会再将整个区域糊上一层。
 - `WA_TransparentForMouseEvents` 保证文件、Fence 和桌面右键菜单仍可正常操作。
 - 普通 Fence 只栅格化四条外缘带；壁纸磁吸 Fence 使用 64 点轮廓查找表，Shader 折射会跟随不规则壁纸边缘。
-- 动画为事件驱动；拖动、缩放、折叠和鼠标沿边移动时才唤醒，强度回落后 Timer 停止。
+- 动画为事件驱动；拖动、缩放和折叠时才唤醒，强度回落后 Timer 停止。
+- 普通鼠标悬停不会移动或重建 `QOpenGLWidget`。这避免 FTG340/X11 下兄弟控件 backing store 花屏，并确保 Fence 内文件始终可以点击。
 - F5/强制同步会通过 `wallpaperCacheChanged` 使旧纹理失效，并上传新壁纸纹理。
 - Shader/context 失败时 Overlay 自动隐藏，原有 CPU 静态玻璃路径继续工作。
 

@@ -317,6 +317,14 @@ public:
         }
     }
 
+    void activateFence(FenceWidget *fence)
+    {
+        if (!fence || !m_canvas || !fence->isVisible())
+            return;
+        m_activeFenceId = fence->fenceId();
+        syncToCanvas();
+    }
+
 protected:
     void initializeGL() override
     {
@@ -786,27 +794,16 @@ private:
         if (!m_canvas)
             return nullptr;
 
-        const QPoint cursor = m_canvas->mapFromGlobal(QCursor::pos());
-        for (auto it = m_canvas->m_fences.crbegin();
-             it != m_canvas->m_fences.crend(); ++it) {
-            FenceWidget *fence = *it;
-            if (!fence || !fence->isVisible() ||
-                fence->width() < 2 || fence->height() < 2)
-                continue;
-            if (fence->geometry().adjusted(-8, -8, 8, 8).contains(cursor)) {
-                m_activeFenceId = fence->fenceId();
-                return fence;
-            }
-        }
-
         for (FenceWidget *fence : m_canvas->m_fences) {
             if (fence && fence->isVisible() &&
                 fence->fenceId() == m_activeFenceId)
                 return fence;
         }
 
-        // Prefer the wallpaper-matched Fence for the first demo frame, then
-        // keep the last active Fence until the pointer enters another one.
+        // Prefer the wallpaper-matched Fence for the first frame. The active
+        // Fence changes only when a Fence itself moves/resizes/collapses.
+        // Repositioning a QOpenGLWidget for every hover event corrupts sibling
+        // backing stores on the FTG340 driver and can also race icon clicks.
         for (FenceWidget *fence : m_canvas->m_fences) {
             if (fence && fence->isVisible() &&
                 fence->m_magneticEdge != FenceWidget::MagneticEdge::None) {
@@ -1157,24 +1154,18 @@ public:
             }
         }
 
-        if (event->type() == QEvent::MouseMove) {
-            if (DesktopCanvas *canvas = canvasForObject(watched)) {
-                if (auto *overlay = overlayFor(canvas)) {
-                    overlay->syncToCanvas();
-                    overlay->requestInteractiveFrame();
-                }
-            }
-        }
-
-        if (qobject_cast<FenceWidget *>(watched) &&
+        if (auto *fence = qobject_cast<FenceWidget *>(watched);
+            fence &&
             (event->type() == QEvent::Move ||
              event->type() == QEvent::Resize ||
              event->type() == QEvent::Show ||
              event->type() == QEvent::Hide)) {
             if (DesktopCanvas *canvas = canvasForObject(watched)) {
                 if (auto *overlay = overlayFor(canvas)) {
-                    overlay->syncToCanvas();
-                    overlay->requestInteractiveFrame();
+                    if (event->type() == QEvent::Hide)
+                        overlay->syncToCanvas();
+                    else
+                        overlay->activateFence(fence);
                 }
             }
         }

@@ -31,8 +31,11 @@ void applyNativeGlass(QMenu *menu)
     menu->ensurePolished();
     menu->adjustSize();
     const QRegion region = roundedMenuRegion(menu);
-    if (!region.isEmpty())
-        menu->setMask(region);
+    // Do not apply the rounded region as a QWidget mask. X11 masks are binary
+    // and turn an otherwise antialiased stylesheet corner into a visible
+    // staircase at 125%/150% scaling. The ARGB surface paints the smooth
+    // corner; the region is used only as the compositor blur hint.
+    menu->clearMask();
     const bool active = KWinBlur::request(menu, region);
     menu->setProperty("kwinBlurActive", active);
 }

@@ -458,6 +458,19 @@ DesktopIcon::DesktopIcon(const DesktopItem &item, QWidget *parent)
         update();
     });
 
+    m_refreshPulseTimer.setInterval(16);
+    connect(&m_refreshPulseTimer, &QTimer::timeout, this, [this] {
+        // Keep the acknowledgement visible long enough to be perceived on
+        // slower desktop compositors (about 1.15 s at 60 Hz).
+        m_refreshPulseProgress += 0.014;
+        if (m_refreshPulseProgress >= 1.0) {
+            m_refreshPulse = false;
+            m_refreshPulseProgress = 0.0;
+            m_refreshPulseTimer.stop();
+        }
+        update();
+    });
+
     m_renameTimer.setSingleShot(true);
     connect(&m_renameTimer, &QTimer::timeout,
             this, [this] { startInlineRename(); });
@@ -497,6 +510,20 @@ void DesktopIcon::setVisualScale(qreal scale)
     m_cellH = qRound(CELL_H * m_scale);
     setFixedSize(m_cellW, m_cellH);
     update();
+}
+
+void DesktopIcon::playRefreshPulse(int delayMs)
+{
+    const auto startPulse = [this] {
+        m_refreshPulse = true;
+        m_refreshPulseProgress = 0.0;
+        m_refreshPulseTimer.start();
+        update();
+    };
+    if (delayMs > 0)
+        QTimer::singleShot(delayMs, this, startPulse);
+    else
+        startPulse();
 }
 
 void DesktopIcon::setFontFamily(const QString &family)
@@ -709,11 +736,27 @@ void DesktopIcon::paintEvent(QPaintEvent *)
     } else if (m_hovered) {
         drawScale = 1.05;
     }
+    if (m_refreshPulse) {
+        const qreal pulse = 4.0 * m_refreshPulseProgress *
+                            (1.0 - m_refreshPulseProgress);
+        drawScale *= 1.0 + pulse * 0.07;
+    }
 
     if (qAbs(drawScale - 1.0) > 0.001) {
         p.translate(w / 2.0, h / 2.0);
         p.scale(drawScale, drawScale);
         p.translate(-w / 2.0, -h / 2.0);
+    }
+
+    // 刷新成功后逐个闪过，让 F5/强制同步有明确视觉回执。
+    if (m_refreshPulse) {
+        const qreal pulse = 4.0 * m_refreshPulseProgress *
+                            (1.0 - m_refreshPulseProgress);
+        const int glowAlpha = qRound(225.0 * pulse);
+        p.setBrush(QColor(56, 189, 248, qRound(95.0 * pulse)));
+        p.setPen(QPen(QColor(224, 242, 254, glowAlpha),
+                      1.5 + pulse * 2.0));
+        p.drawRoundedRect(QRectF(1.5, 1.5, w - 3.0, h - 3.0), 9, 9);
     }
 
     // 选中 / 悬浮背景（灰色边框）
@@ -737,6 +780,18 @@ void DesktopIcon::paintEvent(QPaintEvent *)
         const QIcon::Mode mode = m_cut ? QIcon::Disabled : QIcon::Normal;
         p.drawPixmap(iconRect, m_item.icon.pixmap(
             m_iconSize, m_iconSize, mode));
+        p.restore();
+    }
+
+    if (m_refreshPulse) {
+        const qreal pulse = 4.0 * m_refreshPulseProgress *
+                            (1.0 - m_refreshPulseProgress);
+        p.save();
+        p.setCompositionMode(QPainter::CompositionMode_Screen);
+        p.setPen(QPen(QColor(255, 255, 255, qRound(210.0 * pulse)),
+                      1.5 + pulse));
+        p.setBrush(QColor(186, 230, 253, qRound(125.0 * pulse)));
+        p.drawRoundedRect(QRectF(iconRect).adjusted(-3, -3, 3, 3), 8, 8);
         p.restore();
     }
 

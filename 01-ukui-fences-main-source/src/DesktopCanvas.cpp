@@ -917,7 +917,45 @@ void DesktopCanvas::refreshAll()
     if (updatesWereEnabled)
         setUpdatesEnabled(true);
 
-    // 所有子控件与壁纸都就绪后，只提交最终帧。
+    // 所有子控件与壁纸都就绪后，逐个点亮现有项目。
+    // 这既避免整屏白闪，也让用户能确认强制同步已完成。
+    int refreshIndex = 0;
+    auto pulseIcon = [&refreshIndex](DesktopIcon *icon) {
+        if (!icon || !icon->isVisible())
+            return;
+        icon->playRefreshPulse((refreshIndex++ % 6) * 55);
+    };
+    for (DesktopIcon *icon : m_looseIcons)
+        pulseIcon(icon);
+    for (FenceWidget *fence : m_fences) {
+        if (!fence || fence->collapsed())
+            continue;
+        for (DesktopIcon *icon : fence->icons())
+            pulseIcon(icon);
+    }
+
+    if (QLabel *previous = findChild<QLabel *>(
+            QStringLiteral("ukuiFencesRefreshToast")))
+        previous->deleteLater();
+    auto *toast = new QLabel(
+        QStringLiteral("✓ 已刷新 %1 个桌面项目").arg(refreshIndex), this,
+        Qt::ToolTip | Qt::FramelessWindowHint |
+            Qt::WindowDoesNotAcceptFocus);
+    toast->setObjectName(QStringLiteral("ukuiFencesRefreshToast"));
+    toast->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    toast->setAttribute(Qt::WA_ShowWithoutActivating, true);
+    toast->setAlignment(Qt::AlignCenter);
+    toast->setStyleSheet(
+        "QLabel { color: white; background: rgba(15,118,110,235);"
+        " border: 1px solid rgba(153,246,228,210); border-radius: 9px;"
+        " padding: 8px 18px; font-size: 13px; font-weight: 600; }");
+    toast->adjustSize();
+    toast->move(mapToGlobal(QPoint(
+        qMax(12, (width() - toast->width()) / 2), 34)));
+    toast->show();
+    toast->raise();
+    QTimer::singleShot(2000, toast, &QObject::deleteLater);
+
     update();
 }
 
@@ -5616,6 +5654,7 @@ void DesktopCanvas::saveLayout()
         obj["y"]         = fence->y();
         obj["w"]         = fence->width();
         obj["h"]         = fence->height();
+        obj["expandedH"] = fence->m_expandedH;
         obj["color"]     = fence->fenceColor().name(QColor::HexArgb);
         obj["collapsed"] = fence->collapsed();
         obj["locked"]    = fence->locked();
@@ -5788,8 +5827,26 @@ void DesktopCanvas::loadLayout()
 
     for (const QJsonValue &v : root["fences"].toArray()) {
         const QJsonObject obj = v.toObject();
+        const bool collapsed = obj["collapsed"].toBool();
+        const int storedHeight = obj["h"].toInt(280);
+        const bool lostExpandedGeometry =
+            storedHeight <= FenceWidget::TITLE_H;
+        // V0.5.0 and earlier saved only the collapsed 34px geometry. Recover
+        // those layouts with a usable default. Some old sessions had already
+        // toggled collapsed=false while remaining 34px tall, so height (rather
+        // than the flag alone) is the compatibility signal.
+        const int persistedExpandedHeight = obj["expandedH"].toInt(0);
+        const int expandedHeight = qMax(
+            FenceWidget::TITLE_H + 20,
+            lostExpandedGeometry &&
+                    persistedExpandedHeight <= FenceWidget::TITLE_H + 20
+                ? 240
+                : (persistedExpandedHeight > 0
+                    ? persistedExpandedHeight : storedHeight));
         const QRect geo(obj["x"].toInt(100), obj["y"].toInt(100),
-                        obj["w"].toInt(380), obj["h"].toInt(280));
+                        obj["w"].toInt(380),
+                        collapsed || lostExpandedGeometry
+                            ? expandedHeight : storedHeight);
 
         QString title = obj["title"].toString("分区");
         const QStringList oldEmojiPrefixes = {
@@ -5804,6 +5861,7 @@ void DesktopCanvas::loadLayout()
             }
         }
         auto *fence = createFence(title, geo);
+        fence->m_expandedH = expandedHeight;
         const QString storedId = obj["id"].toString().trimmed();
         if (!storedId.isEmpty())
             fence->m_id = storedId;
@@ -5819,7 +5877,7 @@ void DesktopCanvas::loadLayout()
                 fence->addItem(item);
         }
 
-        if (obj["collapsed"].toBool())
+        if (collapsed)
             fence->setCollapsed(true);
 
         if (obj["locked"].toBool())
