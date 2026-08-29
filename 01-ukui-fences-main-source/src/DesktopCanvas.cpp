@@ -917,13 +917,12 @@ void DesktopCanvas::refreshAll()
     if (updatesWereEnabled)
         setUpdatesEnabled(true);
 
-    // 所有子控件与壁纸都就绪后，逐个点亮现有项目。
-    // 这既避免整屏白闪，也让用户能确认强制同步已完成。
-    int refreshIndex = 0;
-    auto pulseIcon = [&refreshIndex](DesktopIcon *icon) {
+    // 所有子控件与壁纸都就绪后，同时点亮现有项目。
+    // 不再分批延迟，整个视觉反馈严格在 1 秒内结束。
+    auto pulseIcon = [](DesktopIcon *icon) {
         if (!icon || !icon->isVisible())
             return;
-        icon->playRefreshPulse((refreshIndex++ % 6) * 55);
+        icon->playRefreshPulse();
     };
     for (DesktopIcon *icon : m_looseIcons)
         pulseIcon(icon);
@@ -933,28 +932,6 @@ void DesktopCanvas::refreshAll()
         for (DesktopIcon *icon : fence->icons())
             pulseIcon(icon);
     }
-
-    if (QLabel *previous = findChild<QLabel *>(
-            QStringLiteral("ukuiFencesRefreshToast")))
-        previous->deleteLater();
-    auto *toast = new QLabel(
-        QStringLiteral("✓ 已刷新 %1 个桌面项目").arg(refreshIndex), this,
-        Qt::ToolTip | Qt::FramelessWindowHint |
-            Qt::WindowDoesNotAcceptFocus);
-    toast->setObjectName(QStringLiteral("ukuiFencesRefreshToast"));
-    toast->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    toast->setAttribute(Qt::WA_ShowWithoutActivating, true);
-    toast->setAlignment(Qt::AlignCenter);
-    toast->setStyleSheet(
-        "QLabel { color: white; background: rgba(15,118,110,235);"
-        " border: 1px solid rgba(153,246,228,210); border-radius: 9px;"
-        " padding: 8px 18px; font-size: 13px; font-weight: 600; }");
-    toast->adjustSize();
-    toast->move(mapToGlobal(QPoint(
-        qMax(12, (width() - toast->width()) / 2), 34)));
-    toast->show();
-    toast->raise();
-    QTimer::singleShot(2000, toast, &QObject::deleteLater);
 
     update();
 }

@@ -463,7 +463,7 @@ DesktopIcon::DesktopIcon(const DesktopItem &item, QWidget *parent)
         // Advance against wall-clock time.  Counting timer callbacks made a
         // one-second pulse stretch to four or five seconds when FTG340's UI
         // thread was busy during a refresh.
-        constexpr qreal kRefreshPulseDurationMs = 950.0;
+        constexpr qreal kRefreshPulseDurationMs = 1000.0;
         m_refreshPulseProgress = m_refreshPulseClock.isValid()
             ? qBound<qreal>(0.0,
                             m_refreshPulseClock.elapsed() /
