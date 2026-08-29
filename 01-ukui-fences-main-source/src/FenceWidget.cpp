@@ -55,6 +55,8 @@ namespace {
 
 constexpr const char *kInternalFileDragMime =
     "application/x-ukui-fences-file-drag";
+constexpr const char *kCollapseAnimatingProperty =
+    "ukuiFenceCollapseAnimating";
 
 QString normalizedStoredPath(const QString &path)
 {
@@ -315,11 +317,16 @@ void FenceWidget::setCollapsed(bool c)
         m_collapseAnimation = nullptr;
     }
 
+    // A magnetic contour is sampled for the fully-expanded rectangle.  It
+    // must not be intersected with every intermediate animation rectangle:
+    // doing so turns the Fence into a diagonal trapezoid.  The GL overlay
+    // also watches this flag and stays out of the QWidget resize sequence.
+    setProperty(kCollapseAnimatingProperty, true);
     m_collapsed = c;
 
     auto *anim = new QPropertyAnimation(this, "geometry", this);
     m_collapseAnimation = anim;
-    anim->setDuration(160);
+    anim->setDuration(130);
     anim->setEasingCurve(QEasingCurve::OutCubic);
 
     if (m_collapsed) {
@@ -330,16 +337,15 @@ void FenceWidget::setCollapsed(bool c)
     } else {
         // 先展开，再显示图标
         anim->setEndValue(QRect(x(), y(), width(), m_expandedH));
-        connect(anim, &QPropertyAnimation::finished, this, [this] {
-            if (!m_collapsed) {
-                for (auto *ic : m_icons) ic->setVisible(true);
-                if (m_embeddedWidget) m_embeddedWidget->show();
-            }
-        });
     }
     connect(anim, &QPropertyAnimation::finished, this, [this, anim] {
-        if (m_collapseAnimation == anim)
-            m_collapseAnimation = nullptr;
+        if (m_collapseAnimation != anim)
+            return;
+        m_collapseAnimation = nullptr;
+        setProperty(kCollapseAnimatingProperty, false);
+        updateShapeMask();
+        layoutIcons();
+        update();
         emit geometryChanged();
     });
     connect(anim, &QObject::destroyed, this, [this, anim] {
@@ -818,13 +824,15 @@ bool FenceWidget::iconBelongsToThisFence(DesktopIcon *icon) const
 
 void FenceWidget::layoutIcons()
 {
+    const bool showContent = !m_collapsed &&
+        !property(kCollapseAnimatingProperty).toBool();
     if (m_embeddedWidget) {
         m_iconViewport->hide();
         m_embeddedWidget->setGeometry(
             MARGIN, TITLE_H + 4,
             qMax(0, width() - MARGIN * 2),
             qMax(0, height() - TITLE_H - 4 - MARGIN));
-        m_embeddedWidget->setVisible(!m_collapsed);
+        m_embeddedWidget->setVisible(showContent);
         update();
         return;
     }
@@ -844,7 +852,7 @@ void FenceWidget::layoutIcons()
     const int viewportH = contentViewportHeight();
     if (m_iconViewport) {
         m_iconViewport->setGeometry(0, top, width(), viewportH);
-        m_iconViewport->setVisible(!m_collapsed && viewportH > 0);
+        m_iconViewport->setVisible(showContent && viewportH > 0);
     }
 
     const QRect visibleRect(0, 0, width(), viewportH);
@@ -856,7 +864,7 @@ void FenceWidget::layoutIcons()
             row * (iconH + ICON_GAP) - m_scrollOffset);
         m_icons[i]->move(pos);
         const QRect iconRect(pos, m_icons[i]->size());
-        m_icons[i]->setVisible(!m_collapsed &&
+        m_icons[i]->setVisible(showContent &&
                                visibleRect.intersects(iconRect));
     }
     update();
@@ -1338,7 +1346,9 @@ void FenceWidget::refreshMagneticContour()
 QPainterPath FenceWidget::fenceShapePath() const
 {
     QPainterPath path;
-    if (m_magneticEdge == MagneticEdge::None ||
+    if (property(kCollapseAnimatingProperty).toBool() ||
+        m_collapsed ||
+        m_magneticEdge == MagneticEdge::None ||
         m_magneticContour.size() < 2) {
         path.addRoundedRect(QRectF(rect()), 10, 10);
         return path;
@@ -1382,7 +1392,9 @@ QPainterPath FenceWidget::fenceShapePath() const
 
 void FenceWidget::updateShapeMask()
 {
-    if (m_magneticEdge == MagneticEdge::None ||
+    if (property(kCollapseAnimatingProperty).toBool() ||
+        m_collapsed ||
+        m_magneticEdge == MagneticEdge::None ||
         m_magneticContour.size() < 2) {
         clearMask();
         return;
@@ -1392,7 +1404,9 @@ void FenceWidget::updateShapeMask()
 
 int FenceWidget::magneticContentInset() const
 {
-    if (m_magneticEdge != MagneticEdge::Left ||
+    if (property(kCollapseAnimatingProperty).toBool() ||
+        m_collapsed ||
+        m_magneticEdge != MagneticEdge::Left ||
         m_magneticContour.isEmpty())
         return MARGIN;
 

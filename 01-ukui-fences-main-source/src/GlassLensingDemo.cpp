@@ -5,6 +5,7 @@
 #include <QCursor>
 #include <QDateTime>
 #include <QDir>
+#include <QDynamicPropertyChangeEvent>
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
@@ -50,6 +51,8 @@ namespace {
 constexpr int kMetricsIntervalMs = 5000;
 constexpr int kGpuQueryCount = 4;
 constexpr int kMagneticContourSamples = 64;
+constexpr const char *kCollapseAnimatingProperty =
+    "ukuiFenceCollapseAnimating";
 
 qreal envReal(const char *name, qreal fallback, qreal minimum, qreal maximum)
 {
@@ -323,6 +326,12 @@ public:
             return;
         m_activeFenceId = fence->fenceId();
         syncToCanvas();
+    }
+
+    void suspendForFenceAnimation()
+    {
+        m_animationTimer.stop();
+        hide();
     }
 
 protected:
@@ -667,7 +676,12 @@ protected:
             m_program.setUniformValue(
                 "u_lensStrength", static_cast<GLfloat>(state.lensStrength));
 
+            // A collapsed Fence keeps its expanded contour for the next
+            // restore, but that contour must not be interpreted against the
+            // 34 px title geometry.
             const bool hasMagneticContour =
+                !fence->collapsed() &&
+                !fence->property(kCollapseAnimatingProperty).toBool() &&
                 fence->m_magneticEdge != FenceWidget::MagneticEdge::None &&
                 fence->m_magneticContour.size() >= 2;
             const int sourceContourCount = hasMagneticContour
@@ -1155,6 +1169,22 @@ public:
         }
 
         if (auto *fence = qobject_cast<FenceWidget *>(watched);
+            fence && event->type() == QEvent::DynamicPropertyChange) {
+            auto *change = static_cast<QDynamicPropertyChangeEvent *>(event);
+            if (change->propertyName() == kCollapseAnimatingProperty) {
+                if (DesktopCanvas *canvas = canvasForObject(watched)) {
+                    if (auto *overlay = overlayFor(canvas)) {
+                        if (fence->property(
+                                kCollapseAnimatingProperty).toBool())
+                            overlay->suspendForFenceAnimation();
+                        else
+                            overlay->activateFence(fence);
+                    }
+                }
+            }
+        }
+
+        if (auto *fence = qobject_cast<FenceWidget *>(watched);
             fence &&
             (event->type() == QEvent::Move ||
              event->type() == QEvent::Resize ||
@@ -1162,7 +1192,10 @@ public:
              event->type() == QEvent::Hide)) {
             if (DesktopCanvas *canvas = canvasForObject(watched)) {
                 if (auto *overlay = overlayFor(canvas)) {
-                    if (event->type() == QEvent::Hide)
+                    if (fence->property(
+                            kCollapseAnimatingProperty).toBool())
+                        overlay->suspendForFenceAnimation();
+                    else if (event->type() == QEvent::Hide)
                         overlay->syncToCanvas();
                     else
                         overlay->activateFence(fence);

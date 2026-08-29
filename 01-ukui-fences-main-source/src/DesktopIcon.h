@@ -5,6 +5,7 @@
 #include <QRect>
 #include <QColor>
 #include <QFont>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QUrl>
 #include <QList>
@@ -103,6 +104,7 @@ private:
     QTimer      m_clickAnimTimer;
     bool        m_refreshPulse = false;
     qreal       m_refreshPulseProgress = 0.0;
+    QElapsedTimer m_refreshPulseClock;
     QTimer      m_refreshPulseTimer;
     QTimer      m_renameTimer;
     QLineEdit  *m_renameEdit = nullptr;

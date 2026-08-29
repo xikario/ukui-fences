@@ -460,9 +460,16 @@ DesktopIcon::DesktopIcon(const DesktopItem &item, QWidget *parent)
 
     m_refreshPulseTimer.setInterval(16);
     connect(&m_refreshPulseTimer, &QTimer::timeout, this, [this] {
-        // Keep the acknowledgement visible long enough to be perceived on
-        // slower desktop compositors (about 1.15 s at 60 Hz).
-        m_refreshPulseProgress += 0.014;
+        // Advance against wall-clock time.  Counting timer callbacks made a
+        // one-second pulse stretch to four or five seconds when FTG340's UI
+        // thread was busy during a refresh.
+        constexpr qreal kRefreshPulseDurationMs = 950.0;
+        m_refreshPulseProgress = m_refreshPulseClock.isValid()
+            ? qBound<qreal>(0.0,
+                            m_refreshPulseClock.elapsed() /
+                                kRefreshPulseDurationMs,
+                            1.0)
+            : 1.0;
         if (m_refreshPulseProgress >= 1.0) {
             m_refreshPulse = false;
             m_refreshPulseProgress = 0.0;
@@ -517,6 +524,7 @@ void DesktopIcon::playRefreshPulse(int delayMs)
     const auto startPulse = [this] {
         m_refreshPulse = true;
         m_refreshPulseProgress = 0.0;
+        m_refreshPulseClock.restart();
         m_refreshPulseTimer.start();
         update();
     };
